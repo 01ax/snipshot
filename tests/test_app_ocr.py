@@ -111,7 +111,7 @@ try:
     time.sleep(3.0)
     inp.move(640, 500); inp.move(650, 510)
     inp.drag((100, 400), (500, 600))
-    check("a blank area says so instead of copying nothing", wait_log(r"notify: No text was found in that area") is not None, log()[-300:])
+    check("a blank area says so instead of copying nothing", wait_log(r"ocr message: No text found") is not None, log()[-300:])
 
     # 3. Tesseract missing: a clear message with the install command
     daemon.terminate(); daemon.wait(10)
@@ -122,7 +122,7 @@ try:
     time.sleep(3.0)
     inp.move(640, 380); inp.move(650, 390)
     inp.drag((60, 90), (1240, 200))
-    check("without Tesseract the notification gives the install command", wait_log(r"notify: Text recognition needs Tesseract\. Install it with:  sudo apt install tesseract-ocr") is not None, log()[-300:])
+    check("without Tesseract the notification gives the install command", wait_log(r"ocr message: Text recognition isn't set up yet - .*Tesseract") is not None, log()[-300:])
     inp.close()
 finally:
     for p in procs:

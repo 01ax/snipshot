@@ -284,3 +284,36 @@ class OcrResultWindow(Gtk.Window):
     def _update_status(self, copied):
         n = len(self.text())
         self.status.set_text(f"{n} characters" + (" - copied to the clipboard" if copied else ""))
+
+
+class InfoWindow(Gtk.Window):
+    """A small plain message (optionally with a command that can be copied), for things the person must actually see.
+    Desktop notifications of low priority show no banner on GNOME, so they are easy to miss."""
+
+    def __init__(self, title, message, command=None, copy_text=None):
+        super().__init__(title=title, resizable=False)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin_top=16, margin_bottom=14, margin_start=18, margin_end=18)
+        self.set_child(box)
+        label = Gtk.Label(label=message, xalign=0, wrap=True, max_width_chars=56, selectable=True)
+        box.append(label)
+        if command:
+            field = Gtk.Label(label=command, xalign=0, selectable=True, margin_top=2)
+            field.add_css_class("card")
+            field.set_margin_start(2)
+            field.set_margin_end(2)
+            field.add_css_class("monospace")
+            field.set_wrap(True)
+            box.append(field)
+        row = Gtk.Box(spacing=8, halign=Gtk.Align.END, margin_top=4)
+        if command and copy_text:
+            copy = Gtk.Button(label="Copy command")
+            copy.connect("clicked", lambda b: (copy_text(command), b.set_label("Copied")))
+            row.append(copy)
+        close = Gtk.Button(label="Close")
+        close.add_css_class("suggested-action")
+        close.connect("clicked", lambda *_: self.close())
+        row.append(close)
+        box.append(row)
+        keys = Gtk.EventControllerKey()
+        keys.connect("key-pressed", lambda _c, k, *_: (self.close(), True)[1] if k == Gdk.KEY_Escape else False)
+        self.add_controller(keys)

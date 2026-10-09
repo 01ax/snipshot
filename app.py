@@ -162,6 +162,18 @@ class SnipshotApp(Gtk.Application):
             act = Gio.SimpleAction.new(name, GLib.VariantType("s"))
             act.connect("activate", handler)
             self.add_action(act)
+        # Controls for other programs (the desktop shell extension that puts Pause / Stop on the screen-sharing button
+        # uses these over D-Bus): two actions, plus two read-only states it can watch.
+        for name, handler in (("pause-recording", lambda *_: self.pause_recording()), ("stop-recording", lambda *_: self.stop_recording())):
+            act = Gio.SimpleAction.new(name, None)
+            act.connect("activate", handler)
+            self.add_action(act)
+        self._state_actions = {}
+        for name, initial in (("recording-state", "idle"), ("recording-time", "")):
+            act = Gio.SimpleAction.new_stateful(name, None, GLib.Variant("s", initial))
+            act.set_enabled(False)                                        # state only: nothing to activate
+            self.add_action(act)
+            self._state_actions[name] = act
         self.apply_settings()
 
     @staticmethod
@@ -496,7 +508,9 @@ class SnipshotApp(Gtk.Application):
     def run_ocr(self, arr):
         """Recognise the text in ``arr`` off the GUI thread, put it on the clipboard and say what happened."""
         if not OCR.available():
-            return self._notify(OCR.INSTALL_HINT, force=True)
+            return self._ocr_message("Text recognition isn't set up yet",
+                                     "Snipshot reads text with Tesseract, which is not installed on this computer. "
+                                     "Run this once in a terminal, then try again:", OCR.INSTALL_COMMAND)
         import threading
         lang = self.cfg["ocr_lang"]
 
@@ -505,11 +519,20 @@ class SnipshotApp(Gtk.Application):
             GLib.idle_add(self._ocr_done, text, err)
         threading.Thread(target=work, daemon=True).start()
 
+    def _ocr_message(self, title, message, command=None):
+        """A real window, because a low-priority notification shows no banner and the person would see nothing."""
+        _log("ocr message:", title, "-", message)
+        if self._ocr_win is not None:
+            self._ocr_win.destroy()
+        self._ocr_win = DLG.InfoWindow(title, message, command, output.copy_text)
+        self._ocr_win.connect("close-request", lambda *_: (setattr(self, "_ocr_win", None), False)[1])
+        self._ocr_win.present()
+
     def _ocr_done(self, text, err):
         if err:
-            self._notify(err, force=True)
+            self._ocr_message("Text recognition problem", err)
         elif not text:
-            self._notify("No text was found in that area.", force=True)
+            self._ocr_message("No text found", "No text was found in that area. Try selecting a little more around the text.")
         else:
             preview = " ".join(text.split())
             _log(f"ocr: showing {len(text)} characters: {preview[:90]}")
@@ -607,7 +630,9 @@ class SnipshotApp(Gtk.Application):
         elif state in ("recording", "paused"):
             self._keep_awake(True)
             self._refresh_tray()
+            self._publish_recording()
         elif state == "stopping":
+            self._publish_recording()
             if self.tray and self.tray.items and self.tray.items[0] and "Stop" in self.tray.items[0]["label"]:
                 self.tray.set_item_label(0, "Saving the recording...")
 
@@ -626,7 +651,18 @@ class SnipshotApp(Gtk.Application):
         if self.job is not None and self.job.state in ("recording", "paused"):
             self.job.toggle_pause()
 
+    def _publish_recording(self):
+        """Tell other programs (see the actions above) whether a recording runs, is paused, and for how long."""
+        acts = getattr(self, "_state_actions", None)
+        if not acts:
+            return
+        job = self.job
+        state = job.state if job is not None and job.state in ("recording", "paused", "stopping") else "idle"
+        acts["recording-state"].set_state(GLib.Variant("s", state))
+        acts["recording-time"].set_state(GLib.Variant("s", REC.fmt_time(job.elapsed) if state != "idle" else ""))
+
     def _rec_tick(self, seconds):
+        self._publish_recording()
         if self.tray and self.job is not None and self.job.state in ("recording", "paused"):
             self.tray.set_item_label(0, self._stop_label())
             paused = self.job.state == "paused"
@@ -654,6 +690,7 @@ class SnipshotApp(Gtk.Application):
         self.job = None
         self._countdown = None
         self._keep_awake(False)
+        self._publish_recording()
         self._refresh_tray()
         _log("recording finished:", {k: v for k, v in result.items() if k != "notes"})
         extra = " ".join(result["notes"] + ([result["warning"]] if result["warning"] else []))

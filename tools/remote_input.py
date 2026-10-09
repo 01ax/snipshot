@@ -34,7 +34,7 @@ class RemoteInput:
         time.sleep(0.4)
         # The first press of a key the virtual keyboard has not used yet can be swallowed while Mutter maps the symbol,
         # so touch the keys the tests use now, while nothing is listening.
-        for name in ("a", "g", "m", "o", "r", "s", "v", "z", "Return", "Escape"):
+        for name in ("a", "c", "g", "m", "o", "r", "s", "v", "z", "Return", "Escape", "Control_L"):
             self.key(name)
 
     def _call(self, dest, path, iface, method, sig, args=None):
@@ -79,6 +79,17 @@ class RemoteInput:
         time.sleep(0.2)
 
     # -- keyboard (names as in Gdk.KEY_*, e.g. "Return", "Escape", "r")
+    def chord(self, mods, name):
+        """Press modifiers (e.g. ["Control_L"]) + a key, then release everything: chord(["Control_L"], "c") is Ctrl+C."""
+        for m in mods:
+            self._rd("NotifyKeyboardKeysym", "(ub)", (getattr(Gdk, "KEY_" + m), True))
+            time.sleep(0.05)
+        self.key(name)
+        for m in reversed(mods):
+            self._rd("NotifyKeyboardKeysym", "(ub)", (getattr(Gdk, "KEY_" + m), False))
+            time.sleep(0.05)
+        time.sleep(0.2)
+
     def key(self, name):
         sym = getattr(Gdk, "KEY_" + name)
         self._rd("NotifyKeyboardKeysym", "(ub)", (sym, True))

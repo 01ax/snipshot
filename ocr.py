@@ -16,7 +16,8 @@ import tempfile
 import numpy as np
 from PIL import Image
 
-INSTALL_HINT = "Text recognition needs Tesseract. Install it with:  sudo apt install tesseract-ocr"
+INSTALL_COMMAND = "sudo apt install tesseract-ocr"
+INSTALL_HINT = f"Text recognition needs Tesseract. Install it with:  {INSTALL_COMMAND}"
 MAX_SIDE = 7000
 
 

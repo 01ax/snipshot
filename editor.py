@@ -354,7 +354,7 @@ class EditorWindow(Gtk.ApplicationWindow):
         A = self._action
         A("save", self.save, ["<Control>s"])
         A("save_as", self.save_as, ["<Control><Shift>s"])
-        A("copy_image", self.copy_image, ["<Control><Shift>c"])
+        A("copy_image", lambda: self._text_or(self.copy_image, "copy-clipboard"), ["<Control>c"])       # the whole image, edits included
         A("print", self.print_image, ["<Control>p"])
         A("open_with", self.open_with)
         A("open_folder", self.open_folder)
@@ -364,7 +364,7 @@ class EditorWindow(Gtk.ApplicationWindow):
         A("undo", lambda: self._text_or(lambda: self.canvas.undo(), "undo"), ["<Control>z"])
         A("redo", lambda: self._text_or(lambda: self.canvas.redo(), "redo"), ["<Control>y", "<Control><Shift>z"])
         A("cut", lambda: self._text_or(self.canvas.cut_selected, "cut-clipboard"), ["<Control>x"])
-        A("copy", lambda: self._text_or(self._copy_objects, "copy-clipboard"), ["<Control>c"])
+        A("copy", lambda: self._text_or(self._copy_objects, "copy-clipboard"), ["<Control><Shift>c"])    # just the selected objects
         A("paste", lambda: self._text_or(self.paste, "paste-clipboard"), ["<Control>v"])
         A("duplicate", self.canvas.duplicate_selected, ["<Control>d"])
         A("select_all", lambda: self._text_or(self.canvas.select_all, "select-all"), ["<Control>a"])
@@ -417,7 +417,7 @@ class EditorWindow(Gtk.ApplicationWindow):
         for lbl, a in (("Undo", "undo"), ("Redo", "redo")):
             item(e, lbl, a)
         e2 = Gio.Menu()
-        for lbl, a in (("Cut", "cut"), ("Copy", "copy"), ("Paste", "paste"), ("Duplicate", "duplicate"),
+        for lbl, a in (("Cut", "cut"), ("Copy selected object", "copy"), ("Paste", "paste"), ("Duplicate", "duplicate"),
                        ("Select all", "select_all"), ("Delete", "delete")):
             item(e2, lbl, a)
         e.append_section(None, e2)
@@ -483,7 +483,7 @@ class EditorWindow(Gtk.ApplicationWindow):
             bar.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL, margin_start=4, margin_end=4))
         btn("document-save-symbolic", "Save (Ctrl+S)", "save")
         btn("document-save-as-symbolic", "Save as... (Ctrl+Shift+S)", "save_as")
-        btn("edit-copy-symbolic", "Copy image to clipboard (Ctrl+Shift+C)", "copy_image")
+        btn("edit-copy-symbolic", "Copy image to clipboard (Ctrl+C)", "copy_image")
         btn("document-print-symbolic", "Print (Ctrl+P)", "print")
         btn("folder-open-symbolic", "Open containing folder", "open_folder")
         sep()
