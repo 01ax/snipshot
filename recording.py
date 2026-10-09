@@ -48,13 +48,15 @@ class RecordingJob:
                {"kind": "window"}                        (the desktop asks which window)
 
     Callbacks (all on the GLib main loop):
-      on_state(state)   "starting" -> "recording" -> "stopping"
+      on_state(state)   "starting" -> ["ready" -> ] "recording" -> "stopping"
+                        ("ready" only with auto_begin=False: the source is open and begin() starts the file, so the
+                        caller can show a countdown in between)
       on_tick(seconds)  once a second while recording
       on_done(result)   once: {"path": str|None, "error": str|None, "warning": str|None, "notes": [str], "seconds": float,
                                "cancelled": bool}"""
 
     def __init__(self, cfg, target, system=None, mic=None, cursor=None, on_state=None, on_tick=None, on_done=None,
-                 devices=None):
+                 devices=None, auto_begin=True):
         self.cfg, self.target = cfg, target
         self.system = cfg["record_system_audio"] if system is None else system
         self.mic = cfg["record_mic"] if mic is None else mic
@@ -63,6 +65,8 @@ class RecordingJob:
         self.on_tick = on_tick or (lambda t: None)
         self.on_done = on_done or (lambda r: None)
         self.devices = devices
+        self.auto_begin = auto_begin
+        self._info = None
         self.state = "idle"
         self.rec = None
         self.cast = None
@@ -99,9 +103,21 @@ class RecordingJob:
     def _opened(self, info, err):
         if info is None:
             return self._finish(error=err, cancelled=err is None)
-        size = info.get("size") or self.target.get("size")
-        if size is None:
+        if (info.get("size") or self.target.get("size")) is None:
             return self._finish(error="The screen capture did not report its size")
+        self._info = info
+        if self.auto_begin:
+            self.begin()
+        else:
+            self.state = "ready"
+            self.on_state("ready")
+
+    def begin(self):
+        """Start writing the file (the source is already open)."""
+        if self._info is None or self.rec is not None or self._done:
+            return
+        info = self._info
+        size = info.get("size") or self.target.get("size")
         video = {"kind": "pipewire", "node": info["node"], "fd": info.get("fd"), "size": tuple(size),
                  "crop": self.target.get("crop")}
         if self.target["kind"] == "window":
@@ -138,7 +154,7 @@ class RecordingJob:
             self.state = "stopping"
             self.on_state("stopping")
             self.rec.stop()
-        elif self.state == "starting" and self.rec is None:
+        elif self.state in ("starting", "ready") and self.rec is None:
             self._finish(cancelled=True)
 
     def _source_closed(self):

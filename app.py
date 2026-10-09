@@ -14,12 +14,14 @@ import editor as ED  # noqa: E402
 import imaging as im  # noqa: E402
 import model as M  # noqa: E402
 import output  # noqa: E402
+import icons as IC  # noqa: E402
 import picker as PK  # noqa: E402
 import prefs as PR  # noqa: E402
+import recording as REC  # noqa: E402
 import screencast as SCN  # noqa: E402
 import tray as TR  # noqa: E402
 
-APP_ID = "local.snipshot"
+APP_ID = CFG.APP_ID                       # "local.snipshot", or "local.snipshot.dev" for the side-by-side test copy
 DEBUG = bool(os.environ.get("SNIPSHOT_DEBUG"))
 
 
@@ -28,9 +30,13 @@ def _log(*a):
         print("[snipshot]", *a, file=sys.stderr, flush=True)
 
 
-USAGE = """Snipshot - screenshot tool
+USAGE = """Snipshot - screenshot and screen recording tool
 
-  snipshot region                capture a region (drag to select)
+  snipshot region                capture a region (drag to select; the bar at the top switches to recording)
+  snipshot record                the same overlay, opened in Record mode (run it again to stop a recording)
+  snipshot record screen [NAME]  record a whole screen: left, right, a name like DP-2, or the primary one
+  snipshot record window         record one window (the desktop's own picker)
+  snipshot record stop           stop and save the running recording
   snipshot fullscreen [SCREEN]   capture the desktop: all (default), left, right, top, bottom or a name like DP-2
   snipshot window                capture a window (the desktop's own picker)
   snipshot lastregion            capture the previous region again
@@ -40,7 +46,9 @@ USAGE = """Snipshot - screenshot tool
   snipshot prefs                 open preferences
   snipshot --quit                stop the background instance
 
-  --delay SECONDS                wait before capturing (works with region, fullscreen, window, lastregion)
+  --delay SECONDS                wait before capturing (works with region, fullscreen, window, lastregion);
+                                 for recordings it replaces the countdown before the recording starts
+  --audio WHAT                   recordings: none, system, mic or system,mic (default: what you used last)
 """
 
 CSS = """
@@ -56,14 +64,25 @@ scale value { font-size: 12px; font-weight: 600; }
 .italic-btn label { font-style: italic; }
 .countdown { font-size: 34px; font-weight: 700; }
 .picker-thumb { border: 1px solid alpha(#000, .25); }
+.snipshot-toolbar { background: rgba(16,17,22,.93); border-radius: 12px; padding: 6px 8px; color: #fff;
+                    box-shadow: 0 6px 22px rgba(0,0,0,.5); }
+.snipshot-toolbar button { color: #fff; background: transparent; border: none; border-radius: 8px; box-shadow: none;
+                           padding: 6px 10px; min-height: 0; min-width: 0; text-shadow: none; }
+.snipshot-toolbar button:hover { background: rgba(255,255,255,.14); }
+.snipshot-toolbar button:checked { background: #1c71d8; }
+.snipshot-toolbar button.rec:checked { background: #d62828; }
+.snipshot-toolbar separator { background: rgba(255,255,255,.22); min-width: 1px; min-height: 22px; margin: 3px 6px; }
+.snipshot-arm button.start { background: #d62828; font-weight: 700; padding: 6px 14px; }
+.snipshot-arm button.start:hover { background: #ef4444; }
 """
 
 
 class Countdown(Gtk.Window):
     """Small "Capturing in 3..." window. It is closed before the picture is taken, so it never appears in it."""
 
-    def __init__(self, seconds, on_done, on_cancel):
-        super().__init__(title="Snipshot", resizable=False)
+    def __init__(self, seconds, on_done, on_cancel, verb="Capturing"):
+        super().__init__(title=CFG.DISPLAY_NAME, resizable=False)
+        self.verb = verb
         self.left = max(1, int(round(seconds)))
         self.on_done, self.on_cancel, self.finished = on_done, on_cancel, False
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin_top=16, margin_bottom=16,
@@ -83,7 +102,7 @@ class Countdown(Gtk.Window):
         self.timer = GLib.timeout_add_seconds(1, self._tick)
 
     def _show(self):
-        self.label.set_text(f"Capturing in {self.left}...")
+        self.label.set_text(f"{self.verb} in {self.left}...")
 
     def _tick(self):
         self.left -= 1
@@ -116,6 +135,10 @@ class SnipshotApp(Gtk.Application):
         self._hidden = []
         self._selector = None
         self._picker = None
+        self.job = None                      # the RecordingJob while one is starting, running or stopping
+        self._countdown = None
+        self._countdown_secs = 0
+        self._quit_when_saved = False
 
     # ------------------------------------------------------------------ lifecycle
     def do_startup(self):
@@ -128,14 +151,37 @@ class SnipshotApp(Gtk.Application):
         Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         Gtk.IconTheme.get_for_display(Gdk.Display.get_default()).add_search_path(os.path.join(self.data_dir(), "icons"))
         Gtk.Window.set_default_icon_name("snipshot")
+        for name, handler in (("open-path", self._act_open_path), ("show-in-folder", self._act_show_in_folder)):
+            act = Gio.SimpleAction.new(name, GLib.VariantType("s"))
+            act.connect("activate", handler)
+            self.add_action(act)
         self.apply_settings()
 
     @staticmethod
     def data_dir():
-        return os.path.expanduser("~/.local/share")
+        """Where this copy keeps its icons. The normal install shares ~/.local/share; a dev copy keeps its own."""
+        base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+        return os.path.join(base, CFG.APP_NAME) if CFG.CHANNEL else base
 
     def launcher_path(self):
-        return os.path.expanduser("~/.local/bin/snipshot")
+        return os.path.expanduser(f"~/.local/bin/{CFG.APP_NAME}")
+
+    def _ensure_icons(self):
+        """The tray needs the two icon files on disk (the app icon and the same icon with a red recording dot)."""
+        folder = os.path.join(self.data_dir(), "icons", "hicolor", "scalable", "apps")
+        try:
+            os.makedirs(folder, exist_ok=True)
+            for name, svg in (("snipshot.svg", IC.APP_ICON), ("snipshot-recording.svg", IC.RECORDING_ICON)):
+                path = os.path.join(folder, name)
+                try:
+                    same = open(path, encoding="utf-8").read() == svg
+                except OSError:
+                    same = False
+                if not same:
+                    with open(path, "w", encoding="utf-8") as fh:
+                        fh.write(svg)
+        except OSError:
+            pass
 
     def apply_settings(self):
         want_tray = self.cfg["show_tray_icon"]
@@ -143,9 +189,11 @@ class SnipshotApp(Gtk.Application):
             self.tray.stop()
             self.tray = None
         if want_tray:
-            self.tray = TR.TrayIcon("Snipshot", "snipshot", self._tray_items(),
+            self._ensure_icons()
+            live = self.job is not None and self.job.state in ("recording", "stopping")
+            self.tray = TR.TrayIcon(CFG.DISPLAY_NAME, "snipshot-recording" if live else "snipshot", self._tray_items(),
                                     icon_theme_path=os.path.join(self.data_dir(), "icons", "hicolor", "scalable", "apps"),
-                                    on_activate=self.capture_region)
+                                    on_activate=self._tray_clicked, app_id=CFG.APP_NAME)
             self.tray.start()
         if want_tray and not self._held:
             self.hold()
@@ -171,19 +219,39 @@ class SnipshotApp(Gtk.Application):
     def _tray_items(self):
         def it(label, cb):
             return {"label": label, "callback": cb}
-        items = [it("Capture region", self.capture_region), it("Capture last region", self.capture_last),
-                 it("Capture window", self.capture_window), it("Capture full screen", self.capture_fullscreen)]
+        items = []
+        if self.job is not None:                       # first entry while recording: the timer + stop (kept at index 0)
+            items.append(it(self._stop_label(), self.stop_recording))
+            items.append(None)
+        items += [it("Capture region", self.capture_region), it("Capture last region", self.capture_last),
+                  it("Capture window", self.capture_window), it("Capture full screen", self.capture_fullscreen)]
         for label, arg in self._screen_names():
             items.append(it(f"Capture screen {label}", lambda a=arg: self.capture_fullscreen(a)))
         items += [None, it("Capture region in 3 seconds", lambda: self.capture_region(delay=3)),
                   it("Capture region in 5 seconds", lambda: self.capture_region(delay=5)),
                   it("Capture full screen in 5 seconds", lambda: self.capture_fullscreen(delay=5)),
-                  None, it("Open image from file...", self.open_dialog), it("Open image from clipboard", self.open_clipboard),
+                  None]
+        if self.job is None:
+            items += [it("Record region or window...", lambda: self.record_command()),
+                      it("Record full screen", lambda: self.record_command("screen")), None]
+        items += [it("Open image from file...", self.open_dialog), it("Open image from clipboard", self.open_clipboard),
                   it("Open last capture location", self.open_last_location),
+                  it("Open last recording", self.open_last_recording),
                   None, it("Preferences...", lambda: self.show_preferences()), it("Quit Snipshot", self.quit_all)]
         return items
 
+    def _tray_clicked(self):
+        if self.job is not None:
+            self.stop_recording()                         # a click on the red recording icon means "stop"
+        else:
+            self.capture_region()
+
     def quit_all(self):
+        if self.job is not None and not self._quit_when_saved:
+            self._quit_when_saved = True                  # finish and save the recording first, then quit
+            self.stop_recording()
+            GLib.timeout_add_seconds(15, lambda: (self.quit_all(), False)[1])
+            return
         for w in list(self.editors):
             w._closing_ok = True
             w.close()
@@ -201,10 +269,20 @@ class SnipshotApp(Gtk.Application):
 
     @staticmethod
     def parse_args(args):
-        delay, rest, i = None, [], 0
+        delay, _audio, rest = SnipshotApp.parse_opts(args)
+        return delay, rest
+
+    @staticmethod
+    def parse_opts(args):
+        """(delay seconds or None, audio set or None, remaining words). ``--audio none|system|mic|system,mic``."""
+        delay, audio, rest, i = None, None, [], 0
         while i < len(args):
             a = args[i]
-            if a == "--delay" and i + 1 < len(args):
+            if a == "--audio" and i + 1 < len(args) or a.startswith("--audio="):
+                spec = args[i + 1] if a == "--audio" else a.split("=", 1)[1]
+                audio = {w for w in spec.lower().replace("+", ",").split(",") if w in ("system", "mic")}
+                i += 2 if a == "--audio" else 1
+            elif a == "--delay" and i + 1 < len(args):
                 try:
                     delay = max(0.0, float(args[i + 1]))
                 except ValueError:
@@ -219,10 +297,10 @@ class SnipshotApp(Gtk.Application):
             else:
                 rest.append(a)
                 i += 1
-        return delay, rest
+        return delay, audio, rest
 
     def activate_command(self, args):
-        delay, rest = self.parse_args(args)
+        delay, audio, rest = self.parse_opts(args)
         if not rest or rest == ["--daemon"]:
             if not rest and not self.editors:
                 self.capture_region(delay=delay)         # no arguments: behave like Greenshot's launcher
@@ -232,6 +310,8 @@ class SnipshotApp(Gtk.Application):
             print(USAGE)
         elif cmd == "region":
             self.capture_region(delay=delay)
+        elif cmd == "record":
+            self.record_command(rest[1] if len(rest) > 1 else None, rest[2] if len(rest) > 2 else None, delay, audio)
         elif cmd == "fullscreen":
             self.capture_fullscreen(rest[1] if len(rest) > 1 else "all", delay=delay)
         elif cmd == "window":
@@ -289,21 +369,39 @@ class SnipshotApp(Gtk.Application):
         CAP.grab(done, include_cursor=want_cursor)
 
     # -- region
-    def capture_region(self, delay=None):
-        self._run_capture(lambda: self._grab(self._region_shots), delay)
+    def capture_region(self, delay=None, mode="screenshot", rec_opts=None, rec_delay=None):
+        """The selection overlay. ``mode`` is the tab it opens on ("screenshot" or "record"); the toolbar switches it."""
+        shots_then = lambda shots, msg: self._region_shots(shots, msg, mode, rec_opts, rec_delay)      # noqa: E731
+        self._run_capture(lambda: self._grab(shots_then), delay if mode == "screenshot" else 0)
 
-    def _region_shots(self, shots, msg):
+    def _region_shots(self, shots, msg, mode="screenshot", rec_opts=None, rec_delay=None):
         if not shots:
             self._end_capture()
             self._notify(msg or "Capture failed")
             return
-        self._selector = CAP.RegionSelector(shots, self._region_done, bool(self.cfg["capture_cursor"]))
+        rec = dict(system=bool(self.cfg["record_system_audio"]), mic=bool(self.cfg["record_mic"]),
+                   cursor=bool(self.cfg["record_cursor"]))
+        rec.update(rec_opts or {})
+        self._selector = CAP.RegionSelector(shots, lambda r: self._region_done(r, rec_delay),
+                                            bool(self.cfg["capture_cursor"]), mode=mode, rec=rec)
         self._selector.show()
 
-    def _region_done(self, result):
+    def _region_done(self, result, rec_delay=None):
         self._end_capture()
         self._selector = None
         if result is None:
+            return
+        if result["target"] == "window":
+            if result["mode"] == "record":
+                self.begin_recording({"kind": "window"}, result["opts"], rec_delay)
+            else:
+                self.capture_window()
+            return
+        if result["mode"] == "record":
+            info = result["shot"].info
+            target = {"kind": "monitor", "connector": info.connector, "size": (info.pw, info.ph),
+                      "crop": result["region"] if result["target"] == "region" else None}
+            self.begin_recording(target, result["opts"], rec_delay)
             return
         self.cfg["last_region"] = dict(monitor=result["monitor"], x=result["region"][0], y=result["region"][1],
                                        w=result["region"][2], h=result["region"][3])
@@ -377,6 +475,143 @@ class SnipshotApp(Gtk.Application):
         region = (x, y, rw, rh)
         cursor = CAP.cursor_in_region(shot, region) if self.cfg["capture_cursor"] else None
         self.captured(shot.array[y:y + rh, x:x + rw].copy(), cursor, "Region")
+
+    # ------------------------------------------------------------------ screen recording
+    def record_command(self, what=None, arg=None, delay=None, audio=None):
+        """``snipshot record [stop | screen [NAME] | window]``. With nothing running it opens the overlay in Record mode;
+        while a recording runs, any ``record`` command stops it (so the same shortcut starts and stops)."""
+        if self.job is not None:
+            return self.stop_recording()
+        if what == "stop":
+            return self._notify("Nothing is being recorded.")
+        opts = None
+        if audio is not None:
+            opts = dict(system="system" in audio, mic="mic" in audio)
+        if what in (None, "", "region"):
+            return self.capture_region(mode="record", rec_opts=opts, rec_delay=delay)
+        flags = dict(system=bool(self.cfg["record_system_audio"]), mic=bool(self.cfg["record_mic"]),
+                     cursor=bool(self.cfg["record_cursor"]))
+        flags.update(opts or {})
+        if what == "window":
+            return self.begin_recording({"kind": "window"}, flags, delay)
+        if what == "screen":
+            try:
+                mons = SCN.list_monitors()
+            except GLib.Error as e:
+                return self._notify(f"Could not read the monitor layout: {e.message}")
+            m = self.pick_monitor(mons, arg)
+            if m is None:
+                return self._notify("There is no screen to record.")
+            return self.begin_recording({"kind": "monitor", "connector": m.connector, "size": (m.pw, m.ph), "crop": None},
+                                        flags, delay)
+        self._notify(f"Unknown recording command: {what}")
+
+    @staticmethod
+    def pick_monitor(mons, which=None):
+        """left / right / top / bottom / a connector name like DP-2 / a number (1 = leftmost); default the primary screen."""
+        if not mons:
+            return None
+        w = (which or "").lower()
+        if w == "left":
+            return min(mons, key=lambda m: m.x)
+        if w == "right":
+            return max(mons, key=lambda m: m.x)
+        if w == "top":
+            return min(mons, key=lambda m: m.y)
+        if w == "bottom":
+            return max(mons, key=lambda m: m.y)
+        if w.isdigit() and 1 <= int(w) <= len(mons):
+            return sorted(mons, key=lambda m: (m.x, m.y))[int(w) - 1]
+        named = next((m for m in mons if m.connector.lower() == w), None)
+        return named or next((m for m in mons if m.primary), mons[0])
+
+    def begin_recording(self, target, opts, countdown=None):
+        """Remember the sound/pointer choices for next time, open the source, count down, then start the file."""
+        if self.job is not None:
+            return
+        for key, name in (("system", "record_system_audio"), ("mic", "record_mic"), ("cursor", "record_cursor")):
+            self.cfg[name] = bool(opts.get(key, self.cfg[name]))
+        self.cfg.save()
+        self._countdown_secs = self.cfg["record_countdown"] if countdown is None else max(0.0, countdown)
+        self.job = REC.RecordingJob(self.cfg, target, system=self.cfg["record_system_audio"], mic=self.cfg["record_mic"],
+                                    cursor=self.cfg["record_cursor"], auto_begin=False, on_state=self._rec_state,
+                                    on_tick=self._rec_tick, on_done=self._rec_done)
+        self._refresh_tray()
+        self.job.start()
+
+    def stop_recording(self):
+        if self.job is not None:
+            self.job.stop()
+
+    def _rec_state(self, state):
+        _log("recording state:", state)
+        job = self.job
+        if job is None:
+            return
+        if state == "ready":                              # the source is open: count down, then begin
+            if self._countdown_secs > 0:
+                self._countdown = Countdown(self._countdown_secs, lambda: job.begin(), lambda: job.stop(), verb="Recording starts")
+                self._countdown.present()
+            else:
+                GLib.timeout_add(120, lambda: (job.begin(), False)[1])
+        elif state == "recording":
+            self._refresh_tray()
+        elif state == "stopping":
+            if self.tray and self.tray.items and self.tray.items[0] and "Stop" in self.tray.items[0]["label"]:
+                self.tray.set_item_label(0, "Saving the recording...")
+
+    def _stop_label(self):
+        t = REC.fmt_time(self.job.elapsed) if self.job is not None and self.job.state == "recording" else None
+        return f"Stop recording ({t})" if t else "Cancel recording"
+
+    def _rec_tick(self, seconds):
+        if self.tray and self.job is not None and self.job.state == "recording":
+            self.tray.set_item_label(0, self._stop_label())
+            self.tray.set_tooltip(f"Recording {REC.fmt_time(seconds)} - click to stop")
+
+    def _refresh_tray(self):
+        if self.tray is None:
+            return
+        live = self.job is not None and self.job.state in ("recording", "stopping")      # red only once frames are being kept
+        self.tray.set_icon("snipshot-recording" if live else "snipshot")
+        self.tray.set_tooltip("Recording - click to stop" if live else "")
+        self.tray.set_items(self._tray_items())
+
+    def _rec_done(self, result):
+        self.job = None
+        self._countdown = None
+        self._refresh_tray()
+        _log("recording finished:", {k: v for k, v in result.items() if k != "notes"})
+        extra = " ".join(result["notes"] + ([result["warning"]] if result["warning"] else []))
+        if result["cancelled"]:
+            pass
+        elif result["error"] or not result["path"]:
+            self._notify(f"Recording failed: {result['error'] or 'no file was written'}")
+        else:
+            self.cfg["last_recording"] = result["path"]
+            self.cfg.save()
+            self._notify(f"Recording saved: {os.path.basename(result['path'])} ({REC.fmt_time(result['seconds'])})"
+                         + (f"\n{extra}" if extra else ""), path=result["path"], recording=True)
+        if self._quit_when_saved:
+            self.quit_all()
+
+    def open_last_recording(self):
+        p = self.cfg.get("last_recording") or ""
+        if p and os.path.exists(p):
+            self._act_open_path(None, GLib.Variant("s", p))
+        else:
+            folder = self.cfg.record_folder
+            output.open_folder(folder if os.path.isdir(folder) else os.path.expanduser("~"))
+
+    def _act_open_path(self, _action, param):
+        path = param.get_string()
+        try:
+            Gio.AppInfo.launch_default_for_uri(Gio.File.new_for_path(path).get_uri(), None)
+        except GLib.Error as e:
+            self._notify(f"Could not open {path}: {e.message}")
+
+    def _act_show_in_folder(self, _action, param):
+        output.open_folder(param.get_string())
 
     # ------------------------------------------------------------------ destinations
     def captured(self, arr, cursor, title):
@@ -526,14 +761,19 @@ class SnipshotApp(Gtk.Application):
     def show_preferences(self, parent=None):
         PR.PrefsWindow(self, parent).present()
 
-    def _notify(self, text):
+    def _notify(self, text, path=None, recording=False):
+        """A desktop notification. With ``path`` the notification opens that file when clicked and offers "Show in
+        folder". Recordings use a normal-priority notification so the banner (and its buttons) is really shown."""
         _log("notify:", text)
         if not self.cfg.get("show_notifications", True):
             return
-        n = Gio.Notification.new("Snipshot")
+        n = Gio.Notification.new(CFG.DISPLAY_NAME)
         n.set_body(text)
         n.set_icon(Gio.ThemedIcon.new("snipshot"))
-        n.set_priority(Gio.NotificationPriority.LOW)       # quiet: no pop-up sound for routine confirmations
+        n.set_priority(Gio.NotificationPriority.NORMAL if recording else Gio.NotificationPriority.LOW)
+        if path:
+            n.set_default_action_and_target("app.open-path", GLib.Variant("s", path))
+            n.add_button_with_target("Show in folder", "app.show-in-folder", GLib.Variant("s", path))
         self.send_notification(None, n)
 
 

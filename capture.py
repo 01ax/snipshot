@@ -6,6 +6,8 @@
 * ``RegionSelector`` shows each monitor's frozen frame 1:1 on a full-screen window per monitor and lets you drag a
   rectangle, like Greenshot's region capture (M toggles the mouse cursor, Z the zoomer, Esc cancels).
   The selection stays on the monitor where you started dragging, so the result is always real pixels.
+  A toolbar at the top switches the same overlay between taking a screenshot and recording the screen (S / R keys);
+  in record mode it also holds the system-sound and microphone switches.
 """
 import os
 import random
@@ -20,6 +22,7 @@ gi.require_version("Gsk", "4.0")
 gi.require_version("Graphene", "1.0")
 from gi.repository import Gdk, Gio, GLib, Graphene, Gsk, Gtk  # noqa: E402
 
+import icons as IC  # noqa: E402
 import imaging as im  # noqa: E402
 import screencast as SCN  # noqa: E402
 
@@ -190,6 +193,7 @@ def _texture(arr):
 
 DIM = Gdk.RGBA(red=0, green=0, blue=0, alpha=0.38)
 LINE = Gdk.RGBA(red=0.11, green=0.52, blue=1.0, alpha=1.0)
+LINE_REC = Gdk.RGBA(red=0.94, green=0.27, blue=0.27, alpha=1.0)        # the outline turns red in record mode
 CROSS = Gdk.RGBA(red=1, green=1, blue=1, alpha=0.6)
 PILL = Gdk.RGBA(red=0.04, green=0.04, blue=0.07, alpha=0.88)
 WHITE = Gdk.RGBA(red=1, green=1, blue=1, alpha=1)
@@ -207,6 +211,7 @@ class _Shared:
         self.anchor = None           # index of the window where the drag began; the selection never leaves it
         self.hover = None            # (gx, gy) of the pointer
         self.hover_win = None
+        self.armed = False           # record mode: a rectangle is chosen and waits for the Start button / Enter
         self.windows = []
 
     def rect(self):
@@ -240,6 +245,111 @@ class _Canvas(Gtk.Widget):
         self.owner.paint(self, snapshot)
 
 
+def _icon_label(icon, text):
+    box = Gtk.Box(spacing=6)
+    img = IC.ui_image(icon, 18)
+    box.append(img)
+    box.append(Gtk.Label(label=text))
+    return box, img
+
+
+class _Toolbar(Gtk.Box):
+    """Top bar of the overlay: Screenshot | Record, then (recording) system sound / microphone, mouse pointer, and
+    the Window... and This screen shortcuts. It only shows and edits the selector's state."""
+
+    def __init__(self, selector):
+        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        self.selector = selector
+        self._syncing = False
+        self.add_css_class("snipshot-toolbar")
+        self.b_shot, _ = self._toggle("camera", "Screenshot", "Take a screenshot  (S)")
+        self.b_rec, _ = self._toggle("record", "Record", "Record the screen  (R)")
+        self.b_rec.add_css_class("rec")
+        self.b_rec.set_group(self.b_shot)
+        self.b_shot.connect("toggled", lambda b: self._mode("screenshot", b))
+        self.b_rec.connect("toggled", lambda b: self._mode("record", b))
+        self.sep_rec = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
+        self.b_sys, self.img_sys = self._toggle("speaker", "System sound", "Record the sound your computer plays  (A)")
+        self.b_mic, self.img_mic = self._toggle("mic", "Microphone", "Record your microphone  (V)")
+        self.b_ptr, _ = self._toggle("pointer", "Mouse pointer", "Include the mouse pointer  (M)")
+        self.sep_tail = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
+        self.b_window = self._button("window", "Window...", "Pick a window to capture or record")
+        self.b_screen = self._button("screen", "This screen", "Capture or record this whole screen  (Enter)")
+        for w in (self.b_shot, self.b_rec, self.sep_rec, self.b_sys, self.b_mic, self.b_ptr, self.sep_tail,
+                  self.b_window, self.b_screen):
+            self.append(w)
+        self.b_sys.connect("toggled", lambda b: self._flag("system", b))
+        self.b_mic.connect("toggled", lambda b: self._flag("mic", b))
+        self.b_ptr.connect("toggled", lambda b: self._flag("cursor", b))
+        self.b_window.connect("clicked", lambda *_: selector.pick_window())
+        self.b_screen.connect("clicked", lambda *_: selector.pick_screen(self))
+        self.sync()
+
+    @staticmethod
+    def _plain(btn, tip):
+        btn.set_focusable(False)                  # keys (Enter, Esc, S, R...) must reach the overlay, not a button
+        btn.set_focus_on_click(False)
+        btn.set_tooltip_text(tip)
+        return btn
+
+    def _toggle(self, icon, text, tip):
+        box, img = _icon_label(icon, text)
+        btn = self._plain(Gtk.ToggleButton(), tip)
+        btn.set_child(box)
+        return btn, img
+
+    def _button(self, icon, text, tip):
+        box, _img = _icon_label(icon, text)
+        btn = self._plain(Gtk.Button(), tip)
+        btn.set_child(box)
+        return btn
+
+    def _mode(self, mode, btn):
+        if not self._syncing and btn.get_active():
+            self.selector.set_mode(mode)
+
+    def _flag(self, key, btn):
+        if not self._syncing:
+            self.selector.set_flag(key, btn.get_active())
+
+    def sync(self):
+        """Show the selector's current state (called whenever it changes, from any monitor's toolbar)."""
+        sel = self.selector
+        rec = sel.mode == "record"
+        self._syncing = True
+        self.b_rec.set_active(rec)
+        self.b_shot.set_active(not rec)
+        self.b_sys.set_active(sel.rec["system"])
+        self.b_mic.set_active(sel.rec["mic"])
+        self.b_ptr.set_active(sel.cursor_on)
+        self.img_sys.set_from_paintable(IC.texture(IC.UI["speaker" if sel.rec["system"] else "speaker-off"]))
+        self.img_mic.set_from_paintable(IC.texture(IC.UI["mic" if sel.rec["mic"] else "mic-off"]))
+        for w in (self.sep_rec, self.b_sys, self.b_mic):
+            w.set_visible(rec)
+        self._syncing = False
+
+
+class _ArmBar(Gtk.Box):
+    """Shown next to a chosen rectangle in record mode: the red Start button (Enter) and Cancel."""
+
+    def __init__(self, selector):
+        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.add_css_class("snipshot-toolbar")
+        self.add_css_class("snipshot-arm")
+        start = Gtk.Button()
+        start.add_css_class("start")
+        box, _img = _icon_label("record", "Start recording")
+        start.set_child(box)
+        start.set_tooltip_text("Start recording this area  (Enter)")
+        start.set_focusable(False)
+        start.connect("clicked", lambda *_: selector.start_recording())
+        cancel = Gtk.Button(label="Cancel")
+        cancel.set_focusable(False)
+        cancel.connect("clicked", lambda *_: selector.cancel())
+        self.append(start)
+        self.append(cancel)
+
+
 class _MonitorWindow(Gtk.Window):
     def __init__(self, selector, shot, index):
         super().__init__(decorated=False)
@@ -249,7 +359,19 @@ class _MonitorWindow(Gtk.Window):
         self.nh, self.nw = shot.array.shape[:2]
         self.add_css_class("snipshot-overlay")
         self.area = _Canvas(self)
-        self.set_child(self.area)
+        overlay = Gtk.Overlay()
+        overlay.set_child(self.area)
+        self.set_child(overlay)
+        self.toolbar = _Toolbar(selector)
+        self.toolbar.set_halign(Gtk.Align.CENTER)
+        self.toolbar.set_valign(Gtk.Align.START)
+        self.toolbar.set_margin_top(10)
+        overlay.add_overlay(self.toolbar)
+        self.arm_bar = _ArmBar(selector)
+        self.arm_bar.set_halign(Gtk.Align.START)
+        self.arm_bar.set_valign(Gtk.Align.START)
+        self.arm_bar.set_visible(False)
+        overlay.add_overlay(self.arm_bar)
         self.texture = _texture(shot.array)               # the monitor's real pixels, shown 1:1 on that monitor
         drag = Gtk.GestureDrag(button=1)
         drag.connect("drag-begin", self._begin)
@@ -277,6 +399,7 @@ class _MonitorWindow(Gtk.Window):
 
     def _begin(self, g, x, y):
         sh = self.selector.shared
+        self.selector.disarm()
         sh.anchor = self.index
         sh.start = sh.cur = self._g(x, y)
         sh.redraw()
@@ -294,7 +417,7 @@ class _MonitorWindow(Gtk.Window):
         if sh.start:
             ok, sx, sy = g.get_start_point()
             sh.cur = self._clamp_to_anchor(*self._g(sx + dx, sy + dy))
-            self.selector.finish(sh.rect(), sh.anchor)
+            self.selector.released(sh.rect(), sh.anchor)
 
     def _motion(self, _c, x, y):
         sh = self.selector.shared
@@ -308,10 +431,17 @@ class _MonitorWindow(Gtk.Window):
         if keyval == Gdk.KEY_Escape:
             s.cancel()
         elif keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
-            s.finish((self.mx, self.my, self.mw, self.mh), self.index)      # Enter captures this whole monitor
+            s.enter(self.index)                  # Enter: start the armed recording, or take this whole monitor
         elif keyval in (Gdk.KEY_m, Gdk.KEY_M):
-            s.include_cursor = not s.include_cursor
-            s.shared.redraw()
+            s.set_flag("cursor", not s.cursor_on)
+        elif keyval in (Gdk.KEY_r, Gdk.KEY_R):
+            s.set_mode("record")
+        elif keyval in (Gdk.KEY_s, Gdk.KEY_S):
+            s.set_mode("screenshot")
+        elif keyval in (Gdk.KEY_a, Gdk.KEY_A) and s.mode == "record":
+            s.set_flag("system", not s.rec["system"])
+        elif keyval in (Gdk.KEY_v, Gdk.KEY_V) and s.mode == "record":
+            s.set_flag("mic", not s.rec["mic"])
         elif keyval in (Gdk.KEY_z, Gdk.KEY_Z):
             s.zoomer = not s.zoomer
             s.shared.redraw()
@@ -340,21 +470,28 @@ class _MonitorWindow(Gtk.Window):
             snap.append_color(DIM, _rect(cx1, cy0, w - cx1, cy1 - cy0))
             outline = Gsk.RoundedRect()
             outline.init_from_rect(_rect(lx, ly, rw, rh), 0)
-            snap.append_border(outline, [1.5] * 4, [LINE] * 4)
+            line = LINE_REC if sel.mode == "record" else LINE
+            snap.append_border(outline, [1.5] * 4, [line] * 4)
             _nx, _ny, nw_, nh_ = logical_to_native((lx, ly, rw, rh), self.shot.info, self.nw, self.nh)
-            self._pill(widget, snap, f"{nw_} x {nh_}", max(4.0, min(cx0, w - 120.0)), cy0 - 30 if cy0 > 34 else cy1 + 6)
+            label = f"{nw_} x {nh_}" + ("  (recording area)" if sel.mode == "record" else "")
+            self._pill(widget, snap, label, max(4.0, min(cx0, w - 120.0)), cy0 - 30 if cy0 > 34 else cy1 + 6)
         else:
             snap.append_color(DIM, _rect(0, 0, w, h))
             if sh.hover and sh.hover_win == self.index and sh.start is None:
                 hx, hy = sh.hover[0] - self.mx, sh.hover[1] - self.my
                 snap.append_color(CROSS, _rect(0, hy, w, 1))
                 snap.append_color(CROSS, _rect(hx, 0, 1, h))
-        if sh.hover and sh.hover_win == self.index and sel.zoomer:
+        if sh.hover and sh.hover_win == self.index and sel.zoomer and not sh.armed:
             self._loupe(snap, w, h, sh.hover[0] - self.mx, sh.hover[1] - self.my)
         if self.index == 0 and sh.start is None:
-            cur = "on" if sel.include_cursor else "off"
-            self._pill(widget, snap, f"Drag to capture a region  -  Enter: this screen  -  M: mouse cursor ({cur})  -  "
-                                     f"Z: zoomer  -  Esc: cancel", max(8.0, w / 2 - 330), 14)
+            cur = "on" if sel.cursor_on else "off"
+            if sel.mode == "record":
+                text = (f"Drag to choose what to record  -  Enter: this whole screen  -  A: system sound  -  "
+                        f"V: microphone  -  M: mouse pointer ({cur})  -  Esc: cancel")
+            else:
+                text = (f"Drag to capture a region  -  Enter: this screen  -  M: mouse cursor ({cur})  -  "
+                        f"Z: zoomer  -  Esc: cancel")
+            self._pill(widget, snap, text, max(8.0, w / 2 - 330), 74)
 
     def _loupe(self, snap, w, h, px, py):
         """The zoomer: the real pixels around the pointer, magnified, with the centre pixel marked."""
@@ -394,10 +531,13 @@ class RegionSelector:
     ``result`` is a dict: array (real pixels of the region), monitor (connector), region (x, y, w, h native),
     cursor ((sprite, x, y) relative to the region, if the cursor was inside and is included) and shot."""
 
-    def __init__(self, shots, on_done, include_cursor=True):
+    def __init__(self, shots, on_done, include_cursor=True, mode="screenshot", rec=None):
         self.shots = shots
         self.on_done = on_done
         self.include_cursor = include_cursor
+        self.mode = mode if mode in ("screenshot", "record") else "screenshot"
+        self.rec = dict(system=True, mic=False, cursor=True)       # recording options, edited in the toolbar
+        self.rec.update(rec or {})
         self.zoomer = True
         self.shared = _Shared()
         self.finished = False
@@ -407,6 +547,86 @@ class RegionSelector:
             win = _MonitorWindow(self, shot, i)
             self.shared.windows.append(win)
             self.monitor_index[i] = by_connector.get(shot.info.connector, i)
+        self.sync_toolbars()
+
+    # -- toolbar state
+    @property
+    def cursor_on(self):
+        return self.rec["cursor"] if self.mode == "record" else self.include_cursor
+
+    def sync_toolbars(self):
+        for w in self.shared.windows:
+            w.toolbar.sync()
+
+    def set_mode(self, mode):
+        if mode == self.mode:
+            return
+        self.mode = mode
+        self.disarm()
+        self.shared.start = self.shared.cur = None
+        self.sync_toolbars()
+        self.shared.redraw()
+
+    def set_flag(self, key, value):
+        if key == "cursor" and self.mode != "record":
+            self.include_cursor = bool(value)
+        else:
+            self.rec[key] = bool(value)
+        self.sync_toolbars()
+        self.shared.redraw()
+
+    # -- record mode: choose a rectangle, then press Start
+    def released(self, rect, index):
+        """The drag ended. Screenshots are taken at once; a recording waits for Start so the choice can be redone."""
+        if self.mode == "record":
+            if rect and rect[2] >= 16 and rect[3] >= 16:
+                self.arm(rect, index)
+            else:                                     # an accidental click: forget it and let them try again
+                self.shared.start = self.shared.cur = None
+                self.shared.redraw()
+        else:
+            self.finish(rect, index)
+
+    def arm(self, rect, index):
+        sh = self.shared
+        sh.armed = True
+        win = sh.windows[index]
+        self.shared.redraw([index])
+        for i, w in enumerate(sh.windows):
+            w.arm_bar.set_visible(i == index)
+        bar = win.arm_bar
+        nat_w = bar.measure(Gtk.Orientation.HORIZONTAL, -1)[1]
+        nat_h = bar.measure(Gtk.Orientation.VERTICAL, -1)[1]
+        lx, ly = rect[0] - win.mx, rect[1] - win.my
+        x = min(max(8.0, lx + rect[2] / 2 - nat_w / 2), max(8.0, win.mw - nat_w - 8))
+        below = ly + rect[3] + 10
+        y = below if below + nat_h < win.mh - 8 else (ly - nat_h - 10 if ly - nat_h - 10 > 70 else ly + rect[3] - nat_h - 10)
+        bar.set_margin_start(int(x))
+        bar.set_margin_top(int(max(70.0, y)))
+
+    def disarm(self):
+        self.shared.armed = False
+        for w in self.shared.windows:
+            w.arm_bar.set_visible(False)
+
+    def start_recording(self):
+        sh = self.shared
+        if sh.armed and sh.rect():
+            self.finish(sh.rect(), sh.anchor)
+
+    def enter(self, index):
+        if self.mode == "record" and self.shared.armed:
+            return self.start_recording()
+        win = self.shared.windows[index]
+        self.finish((win.mx, win.my, win.mw, win.mh), index)
+
+    def pick_screen(self, toolbar):
+        for i, w in enumerate(self.shared.windows):
+            if w.toolbar is toolbar:
+                return self.finish((w.mx, w.my, w.mw, w.mh), i)
+
+    def pick_window(self):
+        self.finish(None, 0, target="window")
 
     def show(self):
         monitors = Gdk.Display.get_default().get_monitors()
@@ -455,13 +675,20 @@ class RegionSelector:
             self._close()
             self.on_done(None)
 
-    def finish(self, logical_rect, index):
+    def finish(self, logical_rect, index, target=None):
+        """End the selection. ``on_done`` gets None (cancelled) or a dict with "mode" ("screenshot" or "record"),
+        "target" ("region", "screen" or "window"), "monitor", "shot", "opts" (the record options) and, for
+        screenshots, "array", "region" (real pixels) and "cursor"."""
         if self.finished:
             return
         self.finished = True
         win = self.shared.windows[index]
         shot = win.shot
+        mode, opts = self.mode, dict(self.rec)
         self._close()
+        if target == "window":
+            self.on_done(dict(mode=mode, target="window", monitor=shot.info.connector, shot=shot, opts=opts))
+            return
         if not logical_rect or logical_rect[2] < 3 or logical_rect[3] < 3:
             self.on_done(None)
             return
@@ -472,5 +699,11 @@ class RegionSelector:
             self.on_done(None)
             return
         region = (x, y, rw, rh)
-        self.on_done(dict(array=shot.array[y:y + rh, x:x + rw].copy(), monitor=shot.info.connector, region=region,
-                          cursor=cursor_in_region(shot, region) if self.include_cursor else None, shot=shot))
+        if mode == "record":
+            whole = (x, y, rw, rh) == (0, 0, w, h)
+            self.on_done(dict(mode="record", target="screen" if whole else "region", monitor=shot.info.connector,
+                              region=region, opts=opts, shot=shot))
+            return
+        self.on_done(dict(mode="screenshot", target="region", array=shot.array[y:y + rh, x:x + rw].copy(),
+                          monitor=shot.info.connector, region=region, opts=opts, shot=shot,
+                          cursor=cursor_in_region(shot, region) if self.include_cursor else None))

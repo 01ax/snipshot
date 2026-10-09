@@ -44,6 +44,34 @@ APP_ICON = """<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" v
 <circle cx="32" cy="32" r="6.5" fill="#fff"/></svg>"""
 
 
+# Small white glyphs for the capture overlay's toolbar (it is dark). Original artwork, like everything above.
+_UI = '<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#fff" ' \
+      'stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">'
+UI = {
+    "camera": _UI + '<path d="M3.5 8.5 a2 2 0 0 1 2 -2 H8 L9.6 4.5 H14.4 L16 6.5 H18.5 a2 2 0 0 1 2 2 V17 a2 2 0 0 1 -2 2 H5.5 '
+                    'a2 2 0 0 1 -2 -2 Z"/><circle cx="12" cy="12.4" r="3.4"/></svg>',
+    "record": _UI + '<circle cx="12" cy="12" r="8.2"/><circle cx="12" cy="12" r="4.4" fill="#ff5d5d" stroke="none"/></svg>',
+    "speaker": _UI + '<path d="M4 9.5 H7.6 L12 5.6 V18.4 L7.6 14.5 H4 Z" fill="#fff"/><path d="M15.4 9 a4.2 4.2 0 0 1 0 6"/>'
+                     '<path d="M17.8 6.4 a8 8 0 0 1 0 11.2"/></svg>',
+    "speaker-off": _UI + '<path d="M4 9.5 H7.6 L12 5.6 V18.4 L7.6 14.5 H4 Z" fill="#fff"/><path d="M16 9.5 L21 14.5 M21 9.5 L16 14.5"/></svg>',
+    "mic": _UI + '<rect x="9" y="3.5" width="6" height="11" rx="3" fill="#fff"/><path d="M5.8 11.5 a6.2 6.2 0 0 0 12.4 0 M12 17.7 V20.5 '
+                 'M8.6 20.5 H15.4"/></svg>',
+    "mic-off": _UI + '<rect x="9" y="3.5" width="6" height="11" rx="3" fill="#fff"/><path d="M5.8 11.5 a6.2 6.2 0 0 0 12.4 0 M12 17.7 V20.5 '
+                     'M8.6 20.5 H15.4"/><path d="M3.5 3.5 L20.5 20.5" stroke="#ff8a8a"/></svg>',
+    "pointer": _UI + '<path d="M6 3.5 V18.5 L9.8 15 L12.6 20.5 L15 19.3 L12.2 13.9 L17.6 13.7 Z" fill="#fff"/></svg>',
+    "window": _UI + '<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M3.5 9 H20.5"/></svg>',
+    "screen": _UI + '<rect x="3" y="4.5" width="18" height="12" rx="1.8"/><path d="M9 20 H15 M12 16.5 V20"/></svg>',
+    "stop": _UI + '<rect x="6" y="6" width="12" height="12" rx="2" fill="#fff"/></svg>',
+}
+
+# The tray icon while a recording is running: the app icon with a red dot.
+RECORDING_ICON = APP_ICON.replace("</svg>", '<circle cx="47" cy="47" r="12.5" fill="#ef4444" stroke="#fff" stroke-width="3.5"/></svg>')
+
+
+def ui_image(name, size=18):
+    return image(UI[name], size)
+
+
 def texture(svg):
     return Gdk.Texture.new_from_bytes(GLib.Bytes.new(svg.encode()))
 

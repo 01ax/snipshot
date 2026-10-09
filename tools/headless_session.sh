@@ -76,6 +76,10 @@ if [ -z "$ok" ]; then
     echo "headless GNOME did not come up; log:" >&2; tail -20 "$ROOT/gnome-shell.log" >&2; exit 97
 fi
 
+start python3 -I "$(dirname "$(readlink -f "$0")")/fake_watcher.py"        # a tray host, like the AppIndicator extension
+# GTK programs started by the command draw on the private compositor (software rendering, nothing reaches a real screen)
+export WAYLAND_DISPLAY=$(ls "$XDG_RUNTIME_DIR" | grep -E '^wayland-[0-9]+$' | head -1) GDK_BACKEND=wayland GSK_RENDERER=cairo
+
 # virtual audio that exists only inside this private PipeWire: a sink standing in for the speakers ("system sound"),
 # a sink whose monitor is a controllable stand-in microphone, and a silent default microphone
 export VIRTUAL_SINK=snipshot_test_sink VIRTUAL_MIC_FEED=snipshot_mic_feed VIRTUAL_DEFAULT_MIC=snipshot_default_mic

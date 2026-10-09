@@ -78,7 +78,8 @@ class TrayIcon:
     def __init__(self, title, icon_name, items, icon_theme_path="", on_activate=None, app_id="snipshot"):
         TrayIcon._counter += 1
         self.title, self.icon_name, self.icon_theme_path = title, icon_name, icon_theme_path
-        self.items = list(items)
+        self.tooltip = ""
+        self.items = [dict(i) if i else None for i in items]
         self.on_activate = on_activate
         self.app_id = app_id
         self.bus_name = f"org.kde.StatusNotifierItem-{os.getpid()}-{TrayIcon._counter}"
@@ -107,8 +108,33 @@ class TrayIcon:
             Gio.bus_unown_name(self._owner_id)
         self._reg_ids, self.conn, self._owner_id, self._watch_id = [], None, 0, 0
 
+    def set_icon(self, name):
+        """Change the icon (e.g. a red dot while recording)."""
+        if name != self.icon_name:
+            self.icon_name = name
+            self._emit_item("NewIcon")
+
+    def set_tooltip(self, text):
+        if text != self.tooltip:
+            self.tooltip = text
+            self._emit_item("NewToolTip")
+
+    def _emit_item(self, signal):
+        if self.conn:
+            self.conn.emit_signal(None, ITEM_PATH, "org.kde.StatusNotifierItem", signal, None)
+
+    def set_item_label(self, index, label):
+        """Rename one menu entry (0-based) without rebuilding the whole menu, e.g. the running timer."""
+        it = self.items[index] if 0 <= index < len(self.items) else None
+        if it is None or it["label"] == label:
+            return
+        it["label"] = label
+        if self.conn:
+            self.conn.emit_signal(None, MENU_PATH, "com.canonical.dbusmenu", "ItemsPropertiesUpdated",
+                                  GLib.Variant("(a(ia{sv})a(ias))", ([(index + 1, {"label": GLib.Variant("s", label)})], [])))
+
     def set_items(self, items):
-        self.items = list(items)
+        self.items = [dict(i) if i else None for i in items]
         self.revision += 1
         if self.conn:
             self.conn.emit_signal(None, MENU_PATH, "com.canonical.dbusmenu", "LayoutUpdated",
@@ -137,7 +163,7 @@ class TrayIcon:
                        GLib.Variant("(s)", (self.bus_name,)), None, Gio.DBusCallFlags.NONE, 3000, None, done)
 
     def _item_get(self, _c, _s, _p, _i, prop):
-        tooltip = GLib.Variant("(sa(iiay)ss)", ("", [], self.title, ""))
+        tooltip = GLib.Variant("(sa(iiay)ss)", ("", [], self.title, self.tooltip))
         values = {
             "Category": GLib.Variant("s", "ApplicationStatus"), "Id": GLib.Variant("s", self.app_id),
             "Title": GLib.Variant("s", self.title), "Status": GLib.Variant("s", "Active"),

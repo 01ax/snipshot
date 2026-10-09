@@ -7,15 +7,18 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Gio, GLib, Gtk  # noqa: E402
 
 import config as CFG  # noqa: E402
+import recorder as R  # noqa: E402
 
-AUTOSTART = os.path.expanduser("~/.config/autostart/snipshot.desktop")
+AUTOSTART = os.path.expanduser(f"~/.config/autostart/{CFG.APP_NAME}.desktop")
+FPS_CHOICES = (15, 24, 30, 60)
+QUALITY_CHOICES = (("high", "High (large files)"), ("medium", "Medium"), ("low", "Low (small files)"))
 
 
 def set_autostart(enabled, exe):
     if enabled:
         os.makedirs(os.path.dirname(AUTOSTART), exist_ok=True)
         with open(AUTOSTART, "w", encoding="utf-8") as fh:
-            fh.write("[Desktop Entry]\nType=Application\nName=Snipshot\nComment=Screenshot tool (tray icon)\n"
+            fh.write(f"[Desktop Entry]\nType=Application\nName={CFG.DISPLAY_NAME}\nComment=Screenshot tool (tray icon)\n"
                      f"Exec={exe} --daemon\nIcon=snipshot\nTerminal=false\nX-GNOME-Autostart-enabled=true\n")
     elif os.path.exists(AUTOSTART):
         os.remove(AUTOSTART)
@@ -34,6 +37,7 @@ class PrefsWindow(Gtk.Window):
         nb.append_page(self._general(), Gtk.Label(label="General"))
         nb.append_page(self._capture(), Gtk.Label(label="Capture"))
         nb.append_page(self._output(), Gtk.Label(label="Output"))
+        nb.append_page(self._recording(), Gtk.Label(label="Recording"))
         nb.append_page(self._obfuscate(), Gtk.Label(label="Obfuscate"))
         row = Gtk.Box(spacing=8, halign=Gtk.Align.END)
         cancel = Gtk.Button(label="Cancel")
@@ -129,6 +133,64 @@ class PrefsWindow(Gtk.Window):
         self._update_preview()
         return g
 
+    def _recording(self):
+        g = self._page()
+        self.rfolder = self._row(g, 0, "Recordings folder", Gtk.Entry(text=self.cfg["record_dir"]))
+        pick = Gtk.Button(label="Choose...")
+        pick.connect("clicked", lambda *_: self._pick_folder(self.rfolder, "Recordings folder"))
+        g.attach(pick, 2, 0, 1, 1)
+        self.rpattern = self._row(g, 1, "File name pattern", Gtk.Entry(text=self.cfg["record_name"]))
+        self.rpreview = Gtk.Label(xalign=0)
+        self.rpreview.add_css_class("dim-label")
+        g.attach(self.rpreview, 1, 2, 2, 1)
+        avail = R.encoders_available()
+        labels = [R.FORMATS[f]["label"] + ("" if avail.get(f) else " - not installed") for f in CFG.RECORD_FORMATS]
+        self.rfmt = self._row(g, 3, "Video format", Gtk.DropDown.new_from_strings(labels))
+        self.rfmt.set_selected(CFG.RECORD_FORMATS.index(self.cfg["record_format"]))
+        self.rfmt.connect("notify::selected", lambda *_: self._update_rpreview())
+        self.rfps = self._row(g, 4, "Frame rate", Gtk.DropDown.new_from_strings([f"{f} frames per second" for f in FPS_CHOICES]))
+        fps = int(self.cfg["record_fps"])
+        self.rfps.set_selected(FPS_CHOICES.index(fps) if fps in FPS_CHOICES else FPS_CHOICES.index(30))
+        self.rquality = self._row(g, 5, "Quality", Gtk.DropDown.new_from_strings([t for _k, t in QUALITY_CHOICES]))
+        self.rquality.set_selected([k for k, _t in QUALITY_CHOICES].index(self.cfg["record_quality"]))
+        self.rcount = self._row(g, 6, "Countdown (seconds)", Gtk.SpinButton.new_with_range(0, 10, 1))
+        self.rcount.set_value(self.cfg["record_countdown"])
+        g.attach(Gtk.Label(label="Start with these switched on:", xalign=0), 0, 7, 3, 1)
+        self.rsys = Gtk.CheckButton(label="System sound (what the computer plays)")
+        self.rsys.set_active(self.cfg["record_system_audio"])
+        self.rmic = Gtk.CheckButton(label="Microphone")
+        self.rmic.set_active(self.cfg["record_mic"])
+        self.rptr = Gtk.CheckButton(label="Mouse pointer")
+        self.rptr.set_active(self.cfg["record_cursor"])
+        for i, w in enumerate((self.rsys, self.rmic, self.rptr)):
+            w.set_margin_start(24)
+            g.attach(w, 0, 8 + i, 3, 1)
+        try:
+            devs = R.list_audio_devices()
+        except GLib.Error:
+            devs = {"inputs": [], "outputs": []}
+        self._out_nodes = [""] + [n for _l, n, _d in devs["outputs"]]
+        self._in_nodes = [""] + [n for _l, n, _d in devs["inputs"]]
+        self.rout = self._row(g, 11, "Sound output to record",
+                              Gtk.DropDown.new_from_strings(["Default output"] + [l for l, _n, _d in devs["outputs"]]))
+        self.rin = self._row(g, 12, "Microphone",
+                             Gtk.DropDown.new_from_strings(["Default microphone"] + [l for l, _n, _d in devs["inputs"]]))
+        want_out, want_in = self.cfg["record_system_device"], self.cfg["record_mic_device"]
+        self.rout.set_selected(self._out_nodes.index(want_out) if want_out in self._out_nodes else 0)
+        self.rin.set_selected(self._in_nodes.index(want_in) if want_in in self._in_nodes else 0)
+        hint = Gtk.Label(label="Press R in the capture overlay (Alt+Shift+G), or run: snipshot record. Run it again, or "
+                               "click the red tray icon, to stop. Variables: ${YYYY} ${MM} ${DD} ${hh} ${mm} ${ss}.",
+                         xalign=0, wrap=True)
+        hint.add_css_class("dim-label")
+        g.attach(hint, 0, 13, 3, 1)
+        self.rpattern.connect("changed", lambda *_: self._update_rpreview())
+        self._update_rpreview()
+        return g
+
+    def _update_rpreview(self):
+        fmt = CFG.RECORD_FORMATS[self.rfmt.get_selected()]
+        self.rpreview.set_text("Example: " + CFG.expand_pattern(self.rpattern.get_text()) + "." + fmt)
+
     def _obfuscate(self):
         g = self._page()
         g.attach(Gtk.Label(label="Starting values for the Obfuscate tool (you can still change them per object):",
@@ -150,13 +212,14 @@ class PrefsWindow(Gtk.Window):
         fmt = CFG.FORMATS[self.fmt.get_selected()]
         self.preview.set_text("Example: " + CFG.expand_pattern(self.pattern.get_text()) + "." + fmt)
 
-    def _pick_folder(self):
-        dlg = Gtk.FileDialog(title="Output folder")
-        dlg.set_initial_folder(Gio.File.new_for_path(os.path.expanduser(self.folder.get_text())))
+    def _pick_folder(self, entry=None, title="Output folder"):
+        entry = entry or self.folder
+        dlg = Gtk.FileDialog(title=title)
+        dlg.set_initial_folder(Gio.File.new_for_path(os.path.expanduser(entry.get_text())))
 
         def done(d, res):
             try:
-                self.folder.set_text(d.select_folder_finish(res).get_path())
+                entry.set_text(d.select_folder_finish(res).get_path())
             except GLib.Error:
                 pass
         dlg.select_folder(self, None, done)
@@ -177,6 +240,17 @@ class PrefsWindow(Gtk.Window):
         c["obfuscate_pixel_size"] = int(self.px.get_value())
         c["obfuscate_blur_radius"] = int(self.bl.get_value())
         c["obfuscate_randomise"] = self.rand.get_active()
+        c["record_dir"] = self.rfolder.get_text().strip() or CFG.DEFAULTS["record_dir"]
+        c["record_name"] = self.rpattern.get_text().strip() or CFG.DEFAULTS["record_name"]
+        c["record_format"] = CFG.RECORD_FORMATS[self.rfmt.get_selected()]
+        c["record_fps"] = FPS_CHOICES[self.rfps.get_selected()]
+        c["record_quality"] = QUALITY_CHOICES[self.rquality.get_selected()][0]
+        c["record_countdown"] = int(self.rcount.get_value())
+        c["record_system_audio"] = self.rsys.get_active()
+        c["record_mic"] = self.rmic.get_active()
+        c["record_cursor"] = self.rptr.get_active()
+        c["record_system_device"] = self._out_nodes[self.rout.get_selected()]
+        c["record_mic_device"] = self._in_nodes[self.rin.get_selected()]
         c["autostart"] = self.autostart.get_active()
         c.save()
         try:
