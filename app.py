@@ -41,6 +41,7 @@ USAGE = """Snipshot - screenshot and screen recording tool
   snipshot record window         record one window (the desktop's own picker)
   snipshot record pause          pause the running recording (run it again to resume)
   snipshot record stop           stop and save the running recording
+  snipshot record discard        stop and move the running recording to the Trash
   snipshot fullscreen [SCREEN]   capture the desktop: all (default), left, right, top, bottom or a name like DP-2
   snipshot window                capture a window (the desktop's own picker)
   snipshot lastregion            capture the previous region again
@@ -146,6 +147,7 @@ class SnipshotApp(Gtk.Application):
         self._quit_when_saved = False
         self._awake_cookie = 0
         self._ocr_win = None
+        self._discard_pending = False
 
     # ------------------------------------------------------------------ lifecycle
     def do_startup(self):
@@ -164,7 +166,8 @@ class SnipshotApp(Gtk.Application):
             self.add_action(act)
         # Controls for other programs (the desktop shell extension that puts Pause / Stop on the screen-sharing button
         # uses these over D-Bus): two actions, plus two read-only states it can watch.
-        for name, handler in (("pause-recording", lambda *_: self.pause_recording()), ("stop-recording", lambda *_: self.stop_recording())):
+        for name, handler in (("pause-recording", lambda *_: self.pause_recording()), ("stop-recording", lambda *_: self.stop_recording()),
+                              ("discard-recording", lambda *_: self.discard_recording())):
             act = Gio.SimpleAction.new(name, None)
             act.connect("activate", handler)
             self.add_action(act)
@@ -244,6 +247,7 @@ class SnipshotApp(Gtk.Application):
             items.append(it(self._stop_label(), self.stop_recording))
             if self.job.state in ("recording", "paused"):
                 items.append(it(self._pause_label(), self.pause_recording))
+                items.append(it("Delete recording (move to the Trash)", self.discard_recording))
             items.append(None)
         items += [it("Capture region", self.capture_region), it("Capture last region", self.capture_last),
                   it("Capture window", self.capture_window), it("Capture full screen", self.capture_fullscreen)]
@@ -547,6 +551,8 @@ class SnipshotApp(Gtk.Application):
     def record_command(self, what=None, arg=None, delay=None, audio=None):
         """``snipshot record [stop | screen [NAME] | window]``. With nothing running it opens the overlay in Record mode;
         while a recording runs, any ``record`` command stops it (so the same shortcut starts and stops)."""
+        if what == "discard" and self.job is not None:
+            return self.discard_recording()
         if what in ("pause", "resume"):
             if self.job is None or self.job.state not in ("recording", "paused"):
                 return self._notify("Nothing is being recorded.", force=True)
@@ -556,6 +562,8 @@ class SnipshotApp(Gtk.Application):
         if self.job is not None:
             return self.stop_recording()
         if what == "stop":
+            return self._notify("Nothing is being recorded.")
+        if what == "discard":
             return self._notify("Nothing is being recorded.")
         opts = None
         if audio is not None:
@@ -646,6 +654,12 @@ class SnipshotApp(Gtk.Application):
     def _pause_label(self):
         return "Resume recording" if self.job is not None and self.job.state == "paused" else "Pause recording"
 
+    def discard_recording(self):
+        """Stop and throw the recording away: the finished file goes to the Trash (so a slip of the mouse is recoverable)."""
+        if self.job is not None:
+            self._discard_pending = True
+            self.job.stop()
+
     def pause_recording(self):
         """Pause, or resume if already paused."""
         if self.job is not None and self.job.state in ("recording", "paused"):
@@ -694,7 +708,15 @@ class SnipshotApp(Gtk.Application):
         self._refresh_tray()
         _log("recording finished:", {k: v for k, v in result.items() if k != "notes"})
         extra = " ".join(result["notes"] + ([result["warning"]] if result["warning"] else []))
-        if result["cancelled"]:
+        discard, self._discard_pending = self._discard_pending, False
+        if discard and result["path"]:
+            try:
+                Gio.File.new_for_path(result["path"]).trash(None)
+                _log("recording moved to the Trash:", result["path"])
+                self._notify("Recording moved to the Trash.", force=True)
+            except GLib.Error as e:                       # no Trash on this file system: never delete for good
+                self._notify(f"Could not move the recording to the Trash ({e.message}); it was kept at {result['path']}", path=result["path"], recording=True)
+        elif result["cancelled"]:
             pass
         elif result["error"] or not result["path"]:
             self._notify(f"Recording failed: {result['error'] or 'no file was written'}")

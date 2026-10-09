@@ -1,0 +1,25 @@
+/* Snipshot recording controls: an orange pill with the time and three round icon buttons. It is painted the way the
+   shell's own screen-sharing button is (an inset shadow inside a transparent border) so the two line up exactly; the
+   colour is copied from that button at run time and this one is the fallback. */
+.snipshot-controls {
+  border: 3px solid transparent;
+  background-color: transparent;
+  border-radius: 999px;
+  box-shadow: inset 0 0 0 100px #da4816;
+  padding: 0 4px 0 12px;
+  spacing: 2px;
+}
+.snipshot-controls-time {
+  color: white;
+  font-weight: bold;
+  font-feature-settings: "tnum";
+  padding-right: 6px;
+}
+.snipshot-controls.snipshot-paused .snipshot-controls-time { font-style: italic; }
+.snipshot-controls-button {
+  border-radius: 99px;
+  padding: 4px 6px;
+}
+.snipshot-controls-button:hover, .snipshot-controls-button:focus { background-color: rgba(255, 255, 255, 0.28); }
+.snipshot-controls-button:active { background-color: rgba(255, 255, 255, 0.45); }
+.snipshot-controls-icon { icon-size: 16px; color: white; }

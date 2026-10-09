@@ -1,0 +1,7 @@
+{
+  "uuid": "snipshot-controls@01ax.github.io",
+  "name": "Snipshot recording controls",
+  "description": "Pause, stop and delete buttons next to GNOME's orange screen-sharing button (and in the quick settings) while Snipshot records the screen.",
+  "shell-version": ["50"],
+  "version": 1
+}

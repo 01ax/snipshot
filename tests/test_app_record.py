@@ -34,14 +34,18 @@ def check(n, ok, extra=""):
 
 
 tmp = tempfile.mkdtemp(prefix="snipshot-e2e-")
-cfgdir, videos = os.path.join(tmp, "cfg"), os.path.join(tmp, "videos")
+# Trashing works only between folders on the same real file system (GNOME refuses /tmp, a system mount), so the app
+# under test gets its own data folder (with its own Trash) next to the recordings, both under the home directory.
+# Nothing touches the real ~/.local/share/Trash.
+appdata = tempfile.mkdtemp(prefix="snipshot-e2e-data-", dir=os.path.expanduser("~/.cache"))
+cfgdir, videos = os.path.join(tmp, "cfg"), os.path.join(appdata, "videos")
 os.makedirs(cfgdir)
 cfg = CFG.Config(os.path.join(cfgdir, "config.json"))
 cfg["record_dir"], cfg["record_countdown"] = videos, 1
 cfg["record_system_audio"], cfg["record_mic"] = False, False
 cfg["output_dir"] = os.path.join(tmp, "pics")
 cfg.save()
-env = dict(os.environ, SNIPSHOT_CONFIG_DIR=cfgdir, SNIPSHOT_DEBUG="1", SNIPSHOT_CHANNEL="dev")
+env = dict(os.environ, SNIPSHOT_CONFIG_DIR=cfgdir, SNIPSHOT_DEBUG="1", SNIPSHOT_CHANNEL="dev", XDG_DATA_HOME=appdata)
 APP = [sys.executable, os.path.join(ROOT, "app.py")]
 logf = open(os.path.join(tmp, "app.log"), "w")
 procs = []
@@ -209,6 +213,23 @@ try:
         info = R.probe_file(videos_list()[-1])
         check("whole screen is 1280 x 720", info["video"] and info["video"][0][1:3] == (1280, 720), str(info["video"]))
 
+    # ---- delete the recording: stop, and the file goes to the Trash (not gone for good, not left in the folder)
+    n_before = len(videos_list())
+    cmd("record", "screen", "--audio", "none", "--delay", "0")
+    check("record again for the discard test", wait_for(lambda: tray_icon() == "snipshot-recording", 8) is not None)
+    time.sleep(1.5)
+    labels = tray_labels()
+    check("the tray menu offers 'Delete recording'", any(l and l.startswith("Delete recording") for l in labels), str(labels[:4]))
+    cmd("record", "discard")
+    check("discarding returns to idle", wait_for(lambda: tray_icon() == "snipshot", 10) is not None)
+    time.sleep(1.0)
+    trashed = glob.glob(os.path.join(appdata, "Trash", "files", "Recording_*.mp4"))
+    check("no new file is left in the recordings folder", len(videos_list()) == n_before, str(videos_list()))
+    check("the recording is in the Trash", len(trashed) == 1, str(trashed))
+    saved_cfg2 = CFG.Config(os.path.join(cfgdir, "config.json"))
+    check("a discarded recording is not remembered as the last recording", not saved_cfg2["last_recording"].endswith(os.path.basename(trashed[0])) if trashed else False)
+    check("`record discard` with nothing running is harmless", (cmd("record", "discard"), True)[1])
+
     # ---- quitting while recording saves the file first
     n_before = len(videos_list())
     cmd("record", "screen", "--audio", "none", "--delay", "0")
@@ -235,6 +256,7 @@ finally:
         print("---- app log ----\n" + log[-3000:])
     import shutil
     shutil.rmtree(tmp, ignore_errors=True)
+    shutil.rmtree(appdata, ignore_errors=True)
 
 print("\nFAILED" if fails else "\nALL PASSED", fails or "")
 sys.exit(1 if fails else 0)
