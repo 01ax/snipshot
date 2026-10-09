@@ -1,9 +1,14 @@
 """Pure logic in app.py: command-line parsing and which screen `record screen` picks (no windows are opened)."""
+import atexit as _atexit, shutil as _shutil, tempfile as _tempfile
+_made = []
+def _mk(prefix="snipshot-"):
+    d = _tempfile.mkdtemp(prefix=prefix); _made.append(d); return d
+_atexit.register(lambda: [_shutil.rmtree(d, ignore_errors=True) for d in _made])
 import os
 import sys
 import tempfile
 
-os.environ["SNIPSHOT_CONFIG_DIR"] = tempfile.mkdtemp(prefix="snipshot-logic-")
+os.environ["SNIPSHOT_CONFIG_DIR"] = _mk(prefix="snipshot-logic-")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import app as A
 import config as CFG

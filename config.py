@@ -42,6 +42,7 @@ DEFAULTS = {
     "record_system_audio": True,        # what you hear (the default output's monitor)
     "record_mic": False,
     "record_cursor": True,
+    "record_keep_awake": True,          # no idle screen-off / auto-lock while a recording runs
     "record_system_device": "",         # "" = the default output; otherwise a sink's node name
     "record_mic_device": "",            # "" = the default microphone; otherwise a source's node name
     "last_recording": "",

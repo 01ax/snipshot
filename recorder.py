@@ -133,6 +133,16 @@ def window_geometry(video, timeout_s=3.0):
         pipe.set_state(Gst.State.NULL)
 
 
+def scale_crop(expected, actual, crop):
+    """A region chosen in ``expected``-sized pixels, expressed in ``actual``-sized pixels (the stream is not always the
+    size the display configuration suggests, e.g. on fractionally scaled monitors)."""
+    if crop is None or tuple(expected) == tuple(actual):
+        return crop
+    fx, fy = actual[0] / expected[0], actual[1] / expected[1]
+    x, y, w, h = crop
+    return (round(x * fx), round(y * fy), round(w * fx), round(h * fy))
+
+
 # --------------------------------------------------------------------------- pipeline description
 
 def _even(n):

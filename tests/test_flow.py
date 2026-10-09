@@ -1,6 +1,11 @@
 """After-capture flow: picker -> destination, discard, fixed destinations, cursor handling. Offscreen (Broadway)."""
+import atexit as _atexit, shutil as _shutil, tempfile as _tempfile
+_made = []
+def _mk(prefix="snipshot-"):
+    d = _tempfile.mkdtemp(prefix=prefix); _made.append(d); return d
+_atexit.register(lambda: [_shutil.rmtree(d, ignore_errors=True) for d in _made])
 import os, sys, tempfile, glob
-CFG_DIR = tempfile.mkdtemp(prefix="snipshot-flow-cfg-"); OUT_DIR = tempfile.mkdtemp(prefix="snipshot-flow-out-")
+CFG_DIR = _mk(prefix="snipshot-flow-cfg-"); OUT_DIR = _mk(prefix="snipshot-flow-out-")
 os.environ["SNIPSHOT_CONFIG_DIR"] = CFG_DIR
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import gi

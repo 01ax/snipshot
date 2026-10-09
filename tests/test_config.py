@@ -1,11 +1,16 @@
 """Tests for config.py and the model's geometry. Run: python3 -I test_config.py"""
+import atexit as _atexit, shutil as _shutil, tempfile as _tempfile
+_made = []
+def _mk(prefix="snipshot-"):
+    d = _tempfile.mkdtemp(prefix=prefix); _made.append(d); return d
+_atexit.register(lambda: [_shutil.rmtree(d, ignore_errors=True) for d in _made])
 import os
 import sys
 import tempfile
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-tmp = tempfile.mkdtemp(prefix="snipshot-test-")
+tmp = _mk(prefix="snipshot-test-")
 os.environ["SNIPSHOT_CONFIG_DIR"] = tmp
 import config as C
 import model as M

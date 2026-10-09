@@ -25,6 +25,10 @@ check("region past the edge is clamped", R.output_size((1920, 1080), (1800, 1000
 check("tiny region is still 2x2 at least", R.output_size((1920, 1080), (5, 5, 1, 1)) == (2, 2))
 check("odd source with no crop is trimmed even", R.output_size((1921, 1081), None) == (1921, 1081) or True)
 
+check("crop scaling: same size changes nothing", R.scale_crop((1920, 1080), (1920, 1080), (10, 20, 300, 200)) == (10, 20, 300, 200))
+check("crop scaling: a stream twice the size doubles the region", R.scale_crop((1920, 1080), (3840, 2160), (10, 20, 300, 200)) == (20, 40, 600, 400))
+check("crop scaling: no region stays none", R.scale_crop((1, 1), (2, 2), None) is None)
+
 # ---- formats
 R.ensure_gst()
 avail = R.encoders_available()

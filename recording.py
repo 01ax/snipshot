@@ -122,6 +122,12 @@ class RecordingJob:
         size = info.get("size") or self.target.get("size")
         video = {"kind": "pipewire", "node": info["node"], "fd": info.get("fd"), "size": tuple(size),
                  "crop": self.target.get("crop")}
+        if self.target["kind"] == "monitor" and self.target.get("crop"):
+            # trust the stream, not the display configuration, for the size the region is measured in
+            geo = R.window_geometry(video, timeout_s=2.0)
+            if geo is not None and tuple(geo[0]) != tuple(video["size"]):
+                video["crop"] = R.scale_crop(video["size"], geo[0], video["crop"])
+                video["size"] = tuple(geo[0])
         if self.target["kind"] == "window":
             # The stream is a fixed canvas with the window in one corner. Record the window's rectangle at the size it
             # has now; if it is resized later it is scaled to that size (a video file cannot change size part-way).

@@ -8,6 +8,7 @@ from gi.repository import Gio, GLib, Gtk  # noqa: E402
 
 import config as CFG  # noqa: E402
 import recorder as R  # noqa: E402
+import shortcuts as SH  # noqa: E402
 
 AUTOSTART = os.path.expanduser(f"~/.config/autostart/{CFG.APP_NAME}.desktop")
 FPS_CHOICES = (15, 24, 30, 60)
@@ -75,7 +76,36 @@ class PrefsWindow(Gtk.Window):
         self.fit = Gtk.CheckButton(label="Fit large images to the editor window when opening")
         self.fit.set_active(self.cfg["zoom_fit_on_open"])
         g.attach(self.fit, 0, 3, 2, 1)
+        g.attach(Gtk.Label(label="Keyboard shortcuts (GNOME)", xalign=0, margin_top=10), 0, 4, 2, 1)
+        self.sc_label = Gtk.Label(xalign=0, wrap=True)
+        self.sc_label.add_css_class("dim-label")
+        g.attach(self.sc_label, 0, 5, 2, 1)
+        self.sc_btn = Gtk.Button(label="Set up the shortcuts", halign=Gtk.Align.START)
+        self.sc_btn.connect("clicked", lambda *_: self._set_shortcuts())
+        g.attach(self.sc_btn, 0, 6, 2, 1)
+        self._refresh_shortcuts()
         return g
+
+    def _refresh_shortcuts(self, extra=""):
+        names = {"ok": "set", "missing": "not set yet", "different": "set to other keys", "conflict": "keys used by another shortcut"}
+        try:
+            rows = SH.status()
+        except GLib.Error:
+            self.sc_label.set_text("This needs the GNOME desktop; set the shortcuts in your desktop's keyboard settings instead.")
+            self.sc_btn.set_sensitive(False)
+            return
+        lines = []
+        for w, state, _e in rows:
+            keys = w["binding"].replace("<Alt>", "Alt+").replace("<Shift>", "Shift+")
+            lines.append(f"{keys[:-1]}{keys[-1].upper()}  -  {'capture a screenshot' if w['arg'] == 'region' else 'record the screen'}: {names[state]}")
+        self.sc_label.set_text("\n".join(lines) + (f"\n\n{extra}" if extra else ""))
+
+    def _set_shortcuts(self):
+        """Only runs when this button is clicked. Another program's shortcut is never replaced."""
+        try:
+            self._refresh_shortcuts(SH.describe(SH.apply()))
+        except GLib.Error as e:
+            self._refresh_shortcuts(f"Could not change the shortcuts: {e.message}")
 
     def _capture(self):
         g = self._page()
@@ -165,6 +195,9 @@ class PrefsWindow(Gtk.Window):
         for i, w in enumerate((self.rsys, self.rmic, self.rptr)):
             w.set_margin_start(24)
             g.attach(w, 0, 8 + i, 3, 1)
+        self.rawake = Gtk.CheckButton(label="Keep the screen awake while recording (no automatic screen-off or lock)")
+        self.rawake.set_active(self.cfg["record_keep_awake"])
+        g.attach(self.rawake, 0, 14, 3, 1)
         try:
             devs = R.list_audio_devices()
         except GLib.Error:
@@ -249,6 +282,7 @@ class PrefsWindow(Gtk.Window):
         c["record_system_audio"] = self.rsys.get_active()
         c["record_mic"] = self.rmic.get_active()
         c["record_cursor"] = self.rptr.get_active()
+        c["record_keep_awake"] = self.rawake.get_active()
         c["record_system_device"] = self._out_nodes[self.rout.get_selected()]
         c["record_mic_device"] = self._in_nodes[self.rin.get_selected()]
         c["autostart"] = self.autostart.get_active()

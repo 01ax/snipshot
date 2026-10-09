@@ -139,6 +139,7 @@ class SnipshotApp(Gtk.Application):
         self._countdown = None
         self._countdown_secs = 0
         self._quit_when_saved = False
+        self._awake_cookie = 0
 
     # ------------------------------------------------------------------ lifecycle
     def do_startup(self):
@@ -555,6 +556,7 @@ class SnipshotApp(Gtk.Application):
             else:
                 GLib.timeout_add(120, lambda: (job.begin(), False)[1])
         elif state == "recording":
+            self._keep_awake(True)
             self._refresh_tray()
         elif state == "stopping":
             if self.tray and self.tray.items and self.tray.items[0] and "Stop" in self.tray.items[0]["label"]:
@@ -577,9 +579,18 @@ class SnipshotApp(Gtk.Application):
         self.tray.set_tooltip("Recording - click to stop" if live else "")
         self.tray.set_items(self._tray_items())
 
+    def _keep_awake(self, on):
+        """Stop the idle screen-off / lock from cutting a long recording short (a locked screen ends the capture)."""
+        if on and not self._awake_cookie and self.cfg["record_keep_awake"]:
+            self._awake_cookie = self.inhibit(None, Gtk.ApplicationInhibitFlags.IDLE, "Recording the screen")
+        elif not on and self._awake_cookie:
+            self.uninhibit(self._awake_cookie)
+            self._awake_cookie = 0
+
     def _rec_done(self, result):
         self.job = None
         self._countdown = None
+        self._keep_awake(False)
         self._refresh_tray()
         _log("recording finished:", {k: v for k, v in result.items() if k != "notes"})
         extra = " ".join(result["notes"] + ([result["warning"]] if result["warning"] else []))

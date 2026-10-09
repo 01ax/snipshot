@@ -1,9 +1,14 @@
 """Preferences window: the Recording tab builds from the settings and writes them back (private headless session)."""
+import atexit as _atexit, shutil as _shutil, tempfile as _tempfile
+_made = []
+def _mk(prefix="snipshot-"):
+    d = _tempfile.mkdtemp(prefix=prefix); _made.append(d); return d
+_atexit.register(lambda: [_shutil.rmtree(d, ignore_errors=True) for d in _made])
 import os
 import sys
 import tempfile
 
-os.environ["SNIPSHOT_CONFIG_DIR"] = tempfile.mkdtemp(prefix="snipshot-prefs-")
+os.environ["SNIPSHOT_CONFIG_DIR"] = _mk(prefix="snipshot-prefs-")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import gi
 
@@ -48,6 +53,11 @@ class T(A.SnipshotApp):
         win.rmic.set_active(True)
         win.rptr.set_active(False)
         check("the example follows the format and pattern", win.rpreview.get_text().startswith("Example: Clip_") and win.rpreview.get_text().endswith(".webm"), win.rpreview.get_text())
+        check("the shortcuts section shows both shortcuts as not set", "Alt+Shift+G" in win.sc_label.get_text() and "Alt+Shift+R" in win.sc_label.get_text()
+              and win.sc_label.get_text().count("not set yet") == 2, win.sc_label.get_text())
+        win.sc_btn.emit("clicked")
+        check("clicking the button sets them up (in the private session's own settings)", win.sc_label.get_text().count("set\n") + win.sc_label.get_text().count(": set") >= 2
+              and "now runs" in win.sc_label.get_text(), win.sc_label.get_text())
         win._ok()
         c = CFG.Config(cfg.path)
         check("OK saves every recording setting", (c["record_dir"], c["record_name"], c["record_format"], c["record_fps"], c["record_quality"], c["record_countdown"],

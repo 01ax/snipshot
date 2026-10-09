@@ -4,7 +4,7 @@
 # Usage: tests/run_all.sh            (all)      tests/run_all.sh quick      (no recording tests)
 cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
 filter='^dbus-daemon|^\(\/|^$|Gtk-WARNING|goa-|evolution|keyring|discover_other|SpiRegistry|^Non-compat|rm:|Gdk-Message|A connection to the bus|Lost \(or failed|fusermount3|fuse init|libedbus|Glycin|libEGL|MESA|associate portal|WARNING: Glycin'
-plain=(test_effects test_config test_capture_geom test_text_fit test_recorder test_app_logic)
+plain=(test_effects test_config test_capture_geom test_text_fit test_recorder test_app_logic test_shortcuts)
 inside=(test_screencast test_tray test_canvas test_popup_zoom test_zoom_stable test_flow test_overlay_modes)
 rec=(test_record_session test_record_job test_record_window test_app_record test_prefs)
 [ "${1:-}" = quick ] && rec=()
