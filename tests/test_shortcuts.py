@@ -41,6 +41,14 @@ cur = {c["path"]: c for c in SH.current()}
 check("an existing entry for the same command is reused and its keys corrected",
       res[0][1] == "updated" and len(cur) == 2 and cur[SH.BASE + "snip/"]["binding"] == "<Alt><Shift>g" and cur[SH.BASE + "snip/"]["name"] == "snip", str(res))
 
+# GNOME stores modifiers in its own order ("<Shift><Alt>g"): that is the same shortcut, not a different one
+st_.set_strv("custom-keybindings", [])
+e = SH._entry(SH.BASE + "snip/")
+e.set_string("name", "snip"); e.set_string("command", "/x/snipshot region"); e.set_string("binding", "<Shift><Alt>g")
+st_.set_strv("custom-keybindings", [SH.BASE + "snip/"])
+res = SH.apply(EXE)
+check("modifier order does not matter (already set counts as ok, not rewritten)", res[0][1] == "ok" and SH._entry(SH.BASE + "snip/").get_string("binding") == "<Shift><Alt>g", str(res))
+
 # another program holding Alt+Shift+R is never overwritten
 st_.set_strv("custom-keybindings", [])
 other = SH._entry(SH.BASE + "other/")

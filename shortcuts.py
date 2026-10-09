@@ -46,6 +46,15 @@ def current():
     return out
 
 
+def _norm(binding):
+    """'<Shift><Alt>g' and '<Alt><Shift>g' are the same keys: compare modifiers in a fixed order, case-insensitively."""
+    mods, key = [], binding
+    while key.startswith("<") and ">" in key:
+        mods.append(key[1:key.index(">")].lower())
+        key = key[key.index(">") + 1:]
+    return "".join(f"<{m}>" for m in sorted(mods)) + key.lower()
+
+
 def _same_launch(command, want):
     """True when ``command`` runs the same snipshot launcher with the same argument (paths compared by basename)."""
     a, b = command.split(), want.split()
@@ -59,9 +68,9 @@ def status(exe=None):
     for w in wanted(exe):
         mine = next((e for e in entries if _same_launch(e["command"], w["command"])), None)
         if mine is not None:
-            out.append((w, "ok" if mine["binding"] == w["binding"] else "different", mine))
+            out.append((w, "ok" if _norm(mine["binding"]) == _norm(w["binding"]) else "different", mine))
             continue
-        other = next((e for e in entries if e["binding"] == w["binding"]), None)
+        other = next((e for e in entries if _norm(e["binding"]) == _norm(w["binding"])), None)
         out.append((w, "conflict" if other else "missing", other))
     return out
 
