@@ -9,20 +9,27 @@ without touching a screen or a microphone.
 Video source dict:  {"kind": "pipewire", "node": int, "fd": int|None, "size": (w, h), "crop": (x, y, w, h)|None}
                     {"kind": "test", "size": (w, h), "crop": (x, y, w, h)|None}
                     optional "fit": (w, h): scale whatever arrives to this size (black borders keep the aspect ratio).
-                    A window can be resized while it is recorded, and a video file cannot change size, so windows use it.
+                    optional "window": True: a window stream. Mutter sends a fixed-size canvas with the window drawn in
+                    one corner and says where it is in each frame's crop metadata; the recorder cuts that rectangle out
+                    of every frame (it follows the window when it is resized) and scales it to "fit", because a video
+                    file cannot change size part-way.
 Audio source dict:  {"kind": "pulse", "device": "@DEFAULT_MONITOR@" | node name | None}   None = default input
                     {"kind": "test", "freq": 440.0}
 """
+import ctypes
 import os
 import re
 import shutil
 import time
 
 import gi
+import numpy as np
 
 gi.require_version("Gst", "1.0")
+gi.require_version("GstApp", "1.0")
 gi.require_version("GstPbutils", "1.0")
-from gi.repository import GLib, Gst, GstPbutils  # noqa: E402
+gi.require_version("GstVideo", "1.0")
+from gi.repository import GLib, Gst, GstApp, GstPbutils, GstVideo  # noqa: E402,F401
 
 FORMATS = {
     "mp4": dict(ext="mp4", label="MP4 (H.264 + AAC)", needs=("x264enc", "avenc_aac", "mp4mux")),
@@ -91,6 +98,41 @@ def monitor_of(sink_node):
     return f"{sink_node}.monitor"
 
 
+# --------------------------------------------------------------------------- window streams
+
+def read_crop_meta(buf):
+    """(x, y, w, h) from a buffer's GstVideoCropMeta, or None. PyGObject cannot cast a generic GstMeta, so the four
+    guints that follow the GstMeta header (flags + info pointer) are read directly."""
+    try:
+        meta = buf.get_meta(GstVideo.video_crop_meta_api_get_type())
+        if not meta:
+            return None
+        base = hash(meta) & 0xFFFFFFFFFFFFFFFF
+        x, y, w, h = (ctypes.c_uint * 4).from_address(base + 2 * ctypes.sizeof(ctypes.c_void_p))
+        return (int(x), int(y), int(w), int(h)) if w and h else None
+    except Exception:                                        # noqa: BLE001 - an unreadable hint just means "no crop"
+        return None
+
+
+def window_geometry(video, timeout_s=3.0):
+    """Look at the first frame of a window stream: ((canvas_w, canvas_h), (x, y, w, h) of the window or None).
+    Returns None if no frame arrived in time."""
+    ensure_gst()
+    opts = f"fd={video['fd']} " if video.get("fd") is not None else ""
+    pipe = Gst.parse_launch(f"pipewiresrc {opts}path={video['node']} always-copy=true ! video/x-raw ! "
+                            "appsink name=s sync=false max-buffers=1 drop=true")
+    sink = pipe.get_by_name("s")
+    pipe.set_state(Gst.State.PLAYING)
+    try:
+        sample = sink.emit("try-pull-sample", int(timeout_s * Gst.SECOND))
+        if sample is None:
+            return None
+        st = sample.get_caps().get_structure(0)
+        return (st.get_value("width"), st.get_value("height")), read_crop_meta(sample.get_buffer())
+    finally:
+        pipe.set_state(Gst.State.NULL)
+
+
 # --------------------------------------------------------------------------- pipeline description
 
 def _even(n):
@@ -119,6 +161,7 @@ def output_size(size, crop, fit=None):
 
 
 def _video_source(video, fps):
+    """(chain that feeds the encoder, [extra stand-alone chains the pipeline needs])."""
     W, H = video["size"]
     kind = video.get("kind", "pipewire")
     if kind == "test":
@@ -129,13 +172,21 @@ def _video_source(video, fps):
         # keepalive re-sends the last frame when the screen is static, so the video has no gaps
         src = (f"pipewiresrc name=vsrc {opts}path={video['node']} always-copy=true do-timestamp=true "
                f"keepalive-time={max(1, int(1000 / fps))}")
+    if video.get("window"):
+        # the stream is read by Python (to cut the window out of the canvas) and handed to an appsrc
+        fw, fh = output_size(video["size"], None, video["fit"])
+        raw = "" if kind == "test" else " ! video/x-raw"          # (system memory; the test source is already raw)
+        extra = [src + raw + " ! appsink name=wsink emit-signals=true sync=false async=false max-buffers=2 drop=true wait-on-eos=false"]
+        head = ("appsrc name=wsrc is-live=true format=time do-timestamp=true block=false max-bytes=0 ! videoscale add-borders=true "
+                f"method=bilinear ! video/x-raw,width={fw},height={fh},pixel-aspect-ratio=1/1")
+        return head, extra
     if video.get("fit"):
         fw, fh = output_size(video["size"], None, video["fit"])
         return (src + f" ! videoconvert ! videoscale add-borders=true method=bilinear ! "
-                f"video/x-raw,width={fw},height={fh},pixel-aspect-ratio=1/1")
+                f"video/x-raw,width={fw},height={fh},pixel-aspect-ratio=1/1"), []
     l, t, r, b = crop_box(video["size"], video.get("crop"))
     crop = f" ! videocrop left={l} top={t} right={r} bottom={b}" if (l or t or r or b) else ""
-    return src + crop
+    return src + crop, []
 
 
 def _video_encoder(fmt, quality, fps, out_h):
@@ -167,11 +218,12 @@ def build_pipeline(video, audio, out_path, fmt="mp4", fps=30, quality="medium"):
     # MP4 is written as fragments while recording (so a crash or a power cut still leaves a playable file) and
     # rewritten as an ordinary indexed MP4 when the recording is finished. Unbuffered, so what is written is on disk.
     mux = ('mp4mux name=mux fragment-duration=2000 fragment-mode=first-moov-then-finalise' if fmt == "mp4" else
-           'webmmux name=mux') + f' ! filesink location="{out_path}" buffer-mode=unbuffered'
-    vchain = (f"{_video_source(video, fps)} ! videoconvert ! video/x-raw,format=I420 ! videorate ! "
+           'webmmux name=mux') + f' ! filesink location="{out_path}" buffer-mode=unbuffered async=false'
+    head, extra = _video_source(video, fps)
+    vchain = (f"{head} ! videoconvert ! video/x-raw,format=I420 ! videorate ! "
               f"video/x-raw,framerate={fps}/1 ! queue name=vq max-size-time=3000000000 max-size-buffers=0 "
               f"max-size-bytes=0 ! {_video_encoder(fmt, quality, fps, out_h)} ! queue ! mux.")
-    parts = [mux, vchain]
+    parts = [mux, vchain] + extra
     if audio:
         aenc = "avenc_aac bitrate=160000" if fmt == "mp4" else "opusenc bitrate=128000"
         parts.append(f"audiomixer name=amix ! audioconvert ! {aenc} ! queue ! mux.")
@@ -216,12 +268,53 @@ class Recorder:
         except (OSError, GLib.Error) as e:
             self._finish(None, f"Could not start recording: {getattr(e, 'message', e)}")
             return
+        if self.video.get("window"):
+            self._wsrc = self.pipeline.get_by_name("wsrc")
+            self._wcaps = None
+            wsink = self.pipeline.get_by_name("wsink")
+            # (the sinks have async=false: with the default the pipeline waits for a first frame to reach the file before
+            # it is "playing", while the appsink only reports samples once it is playing - a deadlock)
+            wsink.connect("new-sample", lambda sink: self._window_sample(sink, "pull-sample"))
+            wsink.connect("new-preroll", lambda sink: self._window_sample(sink, "pull-preroll"))
+            wsink.connect("eos", lambda _s: GLib.idle_add(self._end_window_feed))
         bus = self.pipeline.get_bus()
         bus.add_signal_watch()
         bus.connect("message", self._on_message)
         self.pipeline.set_state(Gst.State.PLAYING)
         self.state = "recording"
         self.t_start = time.monotonic()
+
+    def _end_window_feed(self):
+        if getattr(self, "_wsrc", None) is not None:
+            self._wsrc.end_of_stream()
+        return False
+
+    def _window_sample(self, sink, pull="pull-sample"):
+        """Streaming thread: cut the window's rectangle out of the canvas frame and push it on. Following the crop
+        hint of every frame is what makes a window that is resized keep recording correctly."""
+        sample = sink.emit(pull)
+        if sample is None:
+            return Gst.FlowReturn.OK
+        buf = sample.get_buffer()
+        st = sample.get_caps().get_structure(0)
+        cw, ch, fmt = st.get_value("width"), st.get_value("height"), st.get_value("format")
+        x, y, w, h = read_crop_meta(buf) or (0, 0, cw, ch)
+        x, y = max(0, min(x, cw - 2)), max(0, min(y, ch - 2))
+        w, h = max(2, min(w, cw - x)), max(2, min(h, ch - y))
+        ok, info = buf.map(Gst.MapFlags.READ)
+        if not ok:
+            return Gst.FlowReturn.OK
+        try:
+            stride = info.size // ch
+            rows = np.frombuffer(info.data, dtype=np.uint8, count=ch * stride).reshape(ch, stride)
+            data = rows[y:y + h, x * 4:(x + w) * 4].tobytes()                 # BGRA / BGRx: 4 bytes a pixel
+        finally:
+            buf.unmap(info)
+        if self._wcaps != (w, h, fmt):
+            self._wsrc.set_caps(Gst.Caps.from_string(f"video/x-raw,format={fmt},width={w},height={h},framerate=0/1"))
+            self._wcaps = (w, h, fmt)
+        self._wsrc.emit("push-buffer", Gst.Buffer.new_wrapped(data))
+        return Gst.FlowReturn.OK
 
     @property
     def elapsed(self):
@@ -232,8 +325,22 @@ class Recorder:
         if self.state != "recording":
             return
         self.state = "stopping"
-        self.pipeline.send_event(Gst.Event.new_eos())
+        self._send_eos()
         self._stop_timer = GLib.timeout_add(int(timeout_s * 1000), self._stop_timeout)
+
+    def _send_eos(self):
+        """End-of-stream into every real source (screen, microphone...). The window feeder's appsrc is left out: it
+        is closed when the screen stream ends, and sending it EOS from here can deadlock against its own pushes."""
+        it = self.pipeline.iterate_sources()
+        while True:
+            res, elem = it.next()
+            if res == Gst.IteratorResult.OK:
+                if elem.get_name() != "wsrc":
+                    elem.send_event(Gst.Event.new_eos())
+            elif res == Gst.IteratorResult.RESYNC:
+                it.resync()
+            else:
+                break
 
     def stop_early(self, reason):
         """The source went away (screen locked, window closed...): finish what has been recorded so far."""
@@ -249,6 +356,8 @@ class Recorder:
             pad = src.get_static_pad("src") if src is not None else None
             if pad is not None:
                 pad.push_event(Gst.Event.new_eos())
+            if self.video.get("window") and getattr(self, "_wsrc", None) is not None:
+                self._wsrc.end_of_stream()
         return False
 
     def _stop_timeout(self):
@@ -271,7 +380,7 @@ class Recorder:
                 self.warning = self.warning or f"The recording ended early: {err.message}"
                 if self.state == "recording":
                     self.state = "stopping"
-                    self.pipeline.send_event(Gst.Event.new_eos())
+                    self._send_eos()
                 if not self._stop_timer:
                     self._stop_timer = GLib.timeout_add(4000, self._stop_timeout)
                 elif self.state == "stopping":

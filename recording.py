@@ -24,7 +24,8 @@ def resolve_audio(cfg, system, mic, devices=None):
         outs = [n for _l, n, _d in devs["outputs"]]
         node = cfg["record_system_device"]
         if node and node not in outs:
-            notes.append("The chosen sound output is not connected, so the default output is used.")
+            if outs:
+                notes.append("The chosen sound output is not connected, so the default output is used.")
             node = ""
         if outs:
             sources.append({"kind": "pulse", "device": f"{node}.monitor" if node else R.SYSTEM_AUDIO})
@@ -34,7 +35,8 @@ def resolve_audio(cfg, system, mic, devices=None):
         ins = [n for _l, n, _d in devs["inputs"]]
         node = cfg["record_mic_device"]
         if node and node not in ins:
-            notes.append("The chosen microphone is not connected, so the default microphone is used.")
+            if ins:
+                notes.append("The chosen microphone is not connected, so the default microphone is used.")
             node = ""
         if ins:
             sources.append({"kind": "pulse", "device": node or None})
@@ -121,7 +123,15 @@ class RecordingJob:
         video = {"kind": "pipewire", "node": info["node"], "fd": info.get("fd"), "size": tuple(size),
                  "crop": self.target.get("crop")}
         if self.target["kind"] == "window":
-            video["fit"] = tuple(size)                    # windows can be resized mid-recording: keep one video size
+            # The stream is a fixed canvas with the window in one corner. Record the window's rectangle at the size it
+            # has now; if it is resized later it is scaled to that size (a video file cannot change size part-way).
+            video["window"] = True
+            geo = R.window_geometry(video)
+            if geo is not None:
+                video["size"] = tuple(geo[0])
+                video["fit"] = tuple(geo[1][2:]) if geo[1] else tuple(geo[0])
+            else:
+                video["fit"] = tuple(size)
         path = CFG.next_record_path(self.cfg, fmt=self.fmt)
         self.rec = R.Recorder(video, self.audio, path, self.fmt, int(self.cfg["record_fps"]), self.cfg["record_quality"],
                               on_done=self._recorder_done)

@@ -112,6 +112,15 @@ if avail.get("mp4"):
     info = R.probe_file(out) if os.path.exists(out) else {"video": []}
     check("region recording has the (even) region size", info["video"] and info["video"][0][1:3] == (400, 300), str(info["video"]))
 
+# ---- window source (frames cut out of the stream's canvas by Python, then scaled to a fixed size)
+if avail.get("mp4"):
+    rec, res, out = record("window.mp4", {"kind": "test", "size": (640, 360), "window": True, "fit": (320, 180)}, [], "mp4", 2.0)
+    info = R.probe_file(out) if os.path.exists(out) else {"video": []}
+    check("window source: finishes and has the fitted size", res.get("path") == out and info["video"] and info["video"][0][1:3] == (320, 180), f"{res} {info['video']}")
+    check("window source: has frames", os.path.exists(out) and R.count_video_frames(out) >= 40)
+    d = R.build_pipeline({"kind": "pipewire", "node": 7, "fd": 9, "size": (1280, 720), "window": True, "fit": (801, 601)}, [], "/x/o.mp4")
+    check("window pipeline: appsink feeds appsrc, sinks are non-async", "appsink name=wsink" in d and "appsrc name=wsrc" in d and d.count("async=false") == 2 and "width=800,height=600" in d)
+
 # ---- failure handling
 res = {}
 bad = R.Recorder({"kind": "test", "size": (640, 360)}, [], "/proc/definitely/not/writable/x.mp4", "mp4", on_done=lambda p, e: res.update(p=p, e=e))
