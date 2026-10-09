@@ -262,7 +262,7 @@ class _Toolbar(Gtk.Box):
         self.selector = selector
         self._syncing = False
         self.add_css_class("snipshot-toolbar")
-        self.b_shot, _ = self._toggle("camera", "Screenshot", "Take a screenshot  (S)")
+        self.b_shot, _ = self._toggle("camera", "Screenshot", "Take a screenshot  (G)")
         self.b_rec, _ = self._toggle("record", "Record", "Record the screen  (R)")
         self.b_rec.add_css_class("rec")
         self.b_rec.set_group(self.b_shot)
@@ -436,7 +436,7 @@ class _MonitorWindow(Gtk.Window):
             s.set_flag("cursor", not s.cursor_on)
         elif keyval in (Gdk.KEY_r, Gdk.KEY_R):
             s.set_mode("record")
-        elif keyval in (Gdk.KEY_s, Gdk.KEY_S):
+        elif keyval in (Gdk.KEY_s, Gdk.KEY_S, Gdk.KEY_g, Gdk.KEY_G):       # G: back to screenshots (as in Alt+Shift+G)
             s.set_mode("screenshot")
         elif keyval in (Gdk.KEY_a, Gdk.KEY_A) and s.mode == "record":
             s.set_flag("system", not s.rec["system"])
@@ -487,10 +487,10 @@ class _MonitorWindow(Gtk.Window):
             cur = "on" if sel.cursor_on else "off"
             if sel.mode == "record":
                 text = (f"Drag to choose what to record  -  Enter: this whole screen  -  A: system sound  -  "
-                        f"V: microphone  -  M: mouse pointer ({cur})  -  Esc: cancel")
+                        f"V: microphone  -  M: mouse pointer ({cur})  -  G: screenshot mode  -  Esc: cancel")
             else:
                 text = (f"Drag to capture a region  -  Enter: this screen  -  M: mouse cursor ({cur})  -  "
-                        f"Z: zoomer  -  Esc: cancel")
+                        f"Z: zoomer  -  R: record mode  -  Esc: cancel")
             self._pill(widget, snap, text, max(8.0, w / 2 - 330), 74)
 
     def _loupe(self, snap, w, h, px, py):
