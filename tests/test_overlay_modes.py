@@ -215,6 +215,36 @@ def script(d):
     inp.key("r")
     d.shot("overlay-record")
     inp.key("Escape")
+
+    # ---- OCR (text) mode
+    d.open_overlay("screenshot")
+    inp.key("o")
+    check("O key switches to text (OCR) mode", d.sel.mode == "ocr" and d.on_main(tb("b_ocr").get_active) and not d.on_main(tb("b_shot").get_active))
+    check("text mode hides the pointer and window buttons and the audio switches", not vis(tb("b_ptr")) and not vis(tb("b_window"))
+          and not vis(tb("b_sys")) and not vis(tb("b_mic")) and vis(tb("b_screen")))
+    inp.key("m")
+    check("M does nothing in text mode (no pointer to include)", d.sel.mode == "ocr" and d.sel.include_cursor is True and d.sel.rec["cursor"] is True)
+    d.shot("overlay-ocr")
+    inp.drag((300, 200), (700, 450))
+    r = d.done[0] if d.done else None
+    check("text mode: a drag finishes at once with the picture of that area", r and r["mode"] == "ocr" and r["target"] == "region"
+          and r["array"].shape[:2] == (250, 400), str(r and (r["mode"], r["array"].shape)))
+    check("text mode: the mouse cursor is never included", r and r["cursor"] is None)
+    d.open_overlay("screenshot")
+    d.click_widget(inp, tb("b_ocr"))
+    check("clicking Text switches to text mode", d.sel.mode == "ocr")
+    inp.key("g")
+    check("G leaves text mode for screenshots", d.sel.mode == "screenshot" and vis(tb("b_ptr")) and vis(tb("b_window")))
+    inp.key("o")
+    inp.key("r")
+    check("R goes from text mode to record mode", d.sel.mode == "record" and vis(tb("b_sys")))
+    inp.key("o")
+    d.click_widget(inp, tb("b_screen"))
+    r = d.done[0] if d.done else None
+    check("text mode: This screen reads the whole monitor", r and r["mode"] == "ocr" and r["array"].shape[:2] == (720, 1280))
+    d.open_overlay("ocr")
+    check("the overlay can open directly in text mode", d.sel.mode == "ocr")
+    inp.key("Escape")
     inp.close()
 
 

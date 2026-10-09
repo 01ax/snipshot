@@ -116,6 +116,33 @@ if avail.get("mp4"):
     info = R.probe_file(out) if os.path.exists(out) else {"video": []}
     check("region recording has the (even) region size", info["video"] and info["video"][0][1:3] == (400, 300), str(info["video"]))
 
+# ---- pause / resume: the paused stretch is cut out, picture and sound stay in sync
+if avail.get("mp4"):
+    out = os.path.join(tmp, "paused.mp4")
+    res, timers = {}, []
+    events = []
+    rec = R.Recorder({"kind": "test", "size": (640, 360)}, [{"kind": "test", "freq": 440.0}], out, "mp4", 30, "medium",
+                     on_done=lambda p, e: (res.update(p=p, e=e), loop.quit()))
+    rec.start()
+    GLib.timeout_add(1500, lambda: (events.append(("pause", rec.pause(), round(rec.elapsed, 1))), False)[1])
+    GLib.timeout_add(3500, lambda: (events.append(("elapsed while paused", round(rec.elapsed, 1))), False)[1])
+    GLib.timeout_add(4000, lambda: (events.append(("resume", rec.resume())), False)[1])
+    GLib.timeout_add(5500, lambda: (rec.stop(), False)[1])
+    GLib.timeout_add_seconds(30, loop.quit)
+    loop.run()
+    check("pause and resume are accepted only in the right state", events[0][:2] == ("pause", True) and events[2] == ("resume", True), str(events))
+    check("the timer stands still while paused", events[1][1] == events[0][2], str(events))
+    info = R.probe_file(out) if res.get("p") else {"duration": 0, "video": [], "audio": []}
+    check("paused recording finished", res.get("p") == out, str(res))
+    check("2.5 s of pause is cut out: 5.5 s run -> ~3 s file", 2.4 <= info["duration"] <= 3.8, f"{info['duration']:.2f}s")
+    n = R.count_video_frames(out) if res.get("p") else 0
+    check("video has ~3 s of frames, no stretch for the pause", 70 <= n <= 115, str(n))
+    check("sound stays in step with the picture", len(info["audio"]) == 1)
+    pipe_ = R.build_pipeline({"kind": "test", "size": (640, 360)}, [{"kind": "test"}], "/x/o.mp4")
+    check("pipeline has pause gates (named queues before the muxer) for picture and sound", "queue name=vout ! mux." in pipe_ and "queue name=aout ! mux." in pipe_)
+    r2 = R.Recorder({"kind": "test", "size": (640, 360)}, [], os.path.join(tmp, "np.mp4"), "mp4")
+    check("pause before recording starts does nothing", r2.pause() is False and r2.resume() is False)
+
 # ---- window source (frames cut out of the stream's canvas by Python, then scaled to a fixed size)
 if avail.get("mp4"):
     rec, res, out = record("window.mp4", {"kind": "test", "size": (640, 360), "window": True, "fit": (320, 180)}, [], "mp4", 2.0)

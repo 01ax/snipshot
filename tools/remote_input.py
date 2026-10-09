@@ -34,7 +34,7 @@ class RemoteInput:
         time.sleep(0.4)
         # The first press of a key the virtual keyboard has not used yet can be swallowed while Mutter maps the symbol,
         # so touch the keys the tests use now, while nothing is listening.
-        for name in ("a", "g", "m", "r", "s", "v", "z", "Return", "Escape"):
+        for name in ("a", "g", "m", "o", "r", "s", "v", "z", "Return", "Escape"):
             self.key(name)
 
     def _call(self, dest, path, iface, method, sig, args=None):

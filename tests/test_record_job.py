@@ -37,6 +37,10 @@ procs = [subprocess.Popen([sys.executable, "-I", os.path.join(os.path.dirname(os
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)]
 
 
+def decode_audio_levels(path):
+    return R.audio_rms_db(path)
+
+
 def run_job(target=TARGET, seconds=2.5, before_stop=None, **kw):
     res, states = {}, []
     job = REC.RecordingJob(cfg, target, on_state=states.append, on_done=lambda r: (res.update(r), loop.quit()), **kw)
@@ -92,6 +96,35 @@ try:
     if res.get("path"):
         d = R.probe_file(res["path"])
         check("  ... and it has the part that was recorded", d["video"] and 1.0 <= d["duration"] <= 5.0, f"{d['duration']:.2f}s")
+
+    # pause / resume through the real ScreenCast stream: the paused stretch is cut out, sound and picture stay in step
+    ptimes = {}
+
+    def do_pause(job):
+        ptimes["elapsed_at_pause"] = round(job.elapsed, 2)
+        job.pause()
+        ptimes["after pause"] = (job.state, job.rec.state)
+
+        def later():
+            ptimes["elapsed_paused"] = round(job.elapsed, 2)
+            job.toggle_pause()
+            ptimes["after_resume"] = job.state
+            return False
+        GLib.timeout_add(2000, later)
+    job, res, states = run_job(seconds=8.0, before_stop=lambda j: GLib.timeout_add(0, lambda: (do_pause(j), False)[1]), system=True, mic=False)
+    check("pause: states go recording -> paused -> recording -> stopping", states == ["starting", "recording", "paused", "recording", "stopping"], str(states))
+    check("pause: pause()/toggle_pause() change the job and recorder state", ptimes.get("after pause") == ("paused", "paused") and ptimes.get("after_resume") == "recording", str(ptimes))
+    check("pause: the timer stood still for the 2 s pause", abs(ptimes.get("elapsed_paused", 99) - ptimes.get("elapsed_at_pause", -99)) < 0.3, str(ptimes))
+    if res.get("path"):
+        info = R.probe_file(res["path"])
+        check("pause: 2 s of pause is cut out of an ~8 s run (~6 s file)", 5.0 <= info["duration"] <= 7.0, f"{info['duration']:.2f}s")
+        check("pause: still one video and one audio stream", len(info["video"]) == 1 and len(info["audio"]) == 1, str(info))
+        n = R.count_video_frames(res["path"])
+        check("pause: ~6 s of frames (not stretched, not 8 s)", 150 <= n <= 215, str(n))
+        a = decode_audio_levels(res["path"])
+        check("pause: sound runs the whole file (no silent hole where the pause was)", a is not None, "")
+    else:
+        check("pause: recording saved", False, str(res))
 
     # low disk space stops the recording instead of filling the disk
     REC.LOW_DISK_BYTES = 10 ** 18

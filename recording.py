@@ -50,7 +50,7 @@ class RecordingJob:
                {"kind": "window"}                        (the desktop asks which window)
 
     Callbacks (all on the GLib main loop):
-      on_state(state)   "starting" -> ["ready" -> ] "recording" -> "stopping"
+      on_state(state)   "starting" -> ["ready" -> ] "recording" <-> "paused" -> "stopping"
                         ("ready" only with auto_begin=False: the source is open and begin() starts the file, so the
                         caller can show a countdown in between)
       on_tick(seconds)  once a second while recording
@@ -158,15 +158,28 @@ class RecordingJob:
                     self.rec.stop_early("The disk is nearly full, so the recording was stopped")
             except OSError:
                 pass
-        return self.state in ("recording", "stopping")
+        return self.state in ("recording", "paused", "stopping")
 
     @property
     def elapsed(self):
         return self.rec.elapsed if self.rec is not None else 0.0
 
+    def pause(self):
+        if self.state == "recording" and self.rec.pause():
+            self.state = "paused"
+            self.on_state("paused")
+
+    def resume(self):
+        if self.state == "paused" and self.rec.resume():
+            self.state = "recording"
+            self.on_state("recording")
+
+    def toggle_pause(self):
+        (self.resume if self.state == "paused" else self.pause)()
+
     def stop(self):
         """Finish and save. Also cancels a recording that is still waiting for a window to be picked."""
-        if self.state == "recording":
+        if self.state in ("recording", "paused"):
             self.state = "stopping"
             self.on_state("stopping")
             self.rec.stop()
@@ -174,8 +187,9 @@ class RecordingJob:
             self._finish(cancelled=True)
 
     def _source_closed(self):
-        if self.rec is not None and self.state == "recording":
-            self.rec.stop_early("The screen capture was ended by the system (was the screen locked, or the window closed?)")
+        if self.rec is not None and self.state in ("recording", "paused"):
+            self.rec.stop_early("The screen capture was stopped from the desktop (its screen-sharing indicator, a locked "
+                                "screen, or the window closing). Everything recorded up to then was kept.")
 
     def _recorder_done(self, path, error):
         self._finish(path=path, error=error, warning=self.rec.warning if self.rec else None)

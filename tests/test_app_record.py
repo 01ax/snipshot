@@ -154,13 +154,28 @@ try:
     inp.key("Return")
     during = tray_icon()
     ok = wait_for(lambda: tray_icon() == "snipshot-recording", 8)
+    t_rec_start = time.time()
     check("after the countdown the tray icon turns red", ok, str(tray_icon()))
     labels = tray_labels()
     check("the tray icon is NOT red while only counting down", during == "snipshot", str(during))
     check("tray offers 'Stop recording (mm:ss)' first", labels and labels[0] and labels[0].startswith("Stop recording"), str(labels[:2]))
-    time.sleep(3.0)
+    check("while recording the tray menu offers Pause", "Pause recording" in labels, str(labels[:3]))
+    time.sleep(1.5)
     labels = tray_labels()
     check("the timer in the tray menu advances", labels[0] not in ("Stop recording (00:00)",), str(labels[0]))
+    t_pause = time.time()
+    cmd("record", "pause")
+    check("`record pause` turns the tray icon amber", wait_for(lambda: tray_icon() == "snipshot-paused", 5) is not None, str(tray_icon()))
+    labels = tray_labels()
+    check("paused: the menu says Resume and the stop entry says paused", "Resume recording" in labels and "paused" in labels[0], str(labels[:3]))
+    time.sleep(2.5)
+    cmd("record", "resume")
+    check("`record resume` goes back to red", wait_for(lambda: tray_icon() == "snipshot-recording", 5) is not None, str(tray_icon()))
+    paused_for = time.time() - t_pause
+    cmd("record", "resume")                                             # resuming when already recording changes nothing
+    time.sleep(1.5)
+    check("resume when not paused is harmless", tray_icon() == "snipshot-recording")
+    t_stop = time.time()
     cmd("record")                                                       # the same shortcut stops it
     got = wait_for(videos_list, 12)
     check("`record` again stops and saves a file", bool(got), str(got))
@@ -168,7 +183,9 @@ try:
     if got:
         info = R.probe_file(got[0])
         check("the file is the dragged region at real pixels (500 x 350)", info["video"] and info["video"][0][1:3] == (500, 350), str(info["video"]))
-        check("duration about as long as it ran", 2.0 <= info["duration"] <= 7.0, f"{info['duration']:.2f}s")
+        wall = t_stop - t_rec_start
+        check("the paused time is not in the file (run ~%.1f s, paused ~%.1f s)" % (wall, paused_for),
+              abs(info["duration"] - (wall - paused_for)) < 1.3, f"file {info['duration']:.2f}s, expected about {wall - paused_for:.2f}s")
         check("system sound was switched on, so the file has an audio stream", len(info["audio"]) == 1, str(info["audio"]))
         f = frame(got[0])
         # region x 200..700 of a screen whose red | green boundary is at x = 427: red on the left, green on the right

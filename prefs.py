@@ -7,6 +7,7 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Gio, GLib, Gtk  # noqa: E402
 
 import config as CFG  # noqa: E402
+import ocr as OCR  # noqa: E402
 import recorder as R  # noqa: E402
 import shortcuts as SH  # noqa: E402
 
@@ -133,6 +134,16 @@ class PrefsWindow(Gtk.Window):
         g.attach(self.notify, 0, 7, 2, 1)
         self.delay = self._row(g, 8, "Capture delay (ms)", Gtk.SpinButton.new_with_range(0, 30000, 100))
         self.delay.set_value(self.cfg["capture_delay_ms"])
+        langs = OCR.languages()
+        self._ocr_langs = langs or [self.cfg["ocr_lang"]]
+        self.ocr = self._row(g, 10, "Text recognition (O) language", Gtk.DropDown.new_from_strings(self._ocr_langs))
+        want = self.cfg["ocr_lang"]
+        self.ocr.set_selected(self._ocr_langs.index(want) if want in self._ocr_langs else 0)
+        self.ocr.set_sensitive(bool(langs))
+        note = Gtk.Label(label=("More languages: sudo apt install tesseract-ocr-<code>  (e.g. tesseract-ocr-fra)" if langs
+                                else OCR.INSTALL_HINT), xalign=0, wrap=True)
+        note.add_css_class("dim-label")
+        g.attach(note, 0, 11, 2, 1)
         hint = Gtk.Label(label="The delay applies to every capture. For a one-off delay use the tray menu "
                                "(Capture ... in 3/5 seconds) or: snipshot --delay 5 region",
                          xalign=0, wrap=True)
@@ -266,6 +277,8 @@ class PrefsWindow(Gtk.Window):
         c["capture_cursor"] = self.cursor.get_active()
         c["show_notifications"] = self.notify.get_active()
         c["capture_delay_ms"] = int(self.delay.get_value())
+        if OCR.available():
+            c["ocr_lang"] = self._ocr_langs[self.ocr.get_selected()]
         c["output_dir"] = self.folder.get_text().strip() or CFG.DEFAULTS["output_dir"]
         c["filename_pattern"] = self.pattern.get_text().strip() or CFG.DEFAULTS["filename_pattern"]
         c["format"] = CFG.FORMATS[self.fmt.get_selected()]

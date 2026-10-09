@@ -229,3 +229,58 @@ def about_dialog(parent, version):
     d.set_license("Personal project. Behaviour modelled on Greenshot; contains none of its code.")
     d.set_logo_icon_name("snipshot")
     d.present()
+
+
+class OcrResultWindow(Gtk.Window):
+    """Shows the text found by OCR and puts it on the clipboard.
+
+    A window (rather than a silent background copy) because GNOME only lets a program that has a focused window set
+    the clipboard: a background daemon whose overlay has just closed is ignored. The text can be corrected here and
+    copied again."""
+
+    def __init__(self, text, copy_text, title="Text from the screen"):
+        super().__init__(title=title, default_width=480, default_height=260)
+        self._copy_text = copy_text
+        self._first = True
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin_top=12, margin_bottom=12, margin_start=14, margin_end=14)
+        self.set_child(box)
+        self.status = Gtk.Label(xalign=0)
+        self.status.add_css_class("dim-label")
+        box.append(self.status)
+        self.buffer = Gtk.TextBuffer()
+        self.buffer.set_text(text)
+        view = Gtk.TextView(buffer=self.buffer, wrap_mode=Gtk.WrapMode.WORD_CHAR, left_margin=6, right_margin=6, top_margin=6,
+                            bottom_margin=6, monospace=True)
+        scroll = Gtk.ScrolledWindow(vexpand=True, child=view)
+        scroll.add_css_class("card")
+        box.append(scroll)
+        row = Gtk.Box(spacing=8, halign=Gtk.Align.END)
+        copy = Gtk.Button(label="Copy again")
+        copy.connect("clicked", lambda *_: self.copy())
+        close = Gtk.Button(label="Close")
+        close.add_css_class("suggested-action")
+        close.connect("clicked", lambda *_: self.close())
+        row.append(copy)
+        row.append(close)
+        box.append(row)
+        keys = Gtk.EventControllerKey()
+        keys.connect("key-pressed", lambda _c, k, *_: (self.close(), True)[1] if k == Gdk.KEY_Escape else False)
+        self.add_controller(keys)
+        self.connect("notify::is-active", self._on_active)
+        self._update_status(False)
+
+    def _on_active(self, *_):
+        if self._first and self.is_active():              # the first moment this window has focus: now the copy is accepted
+            self._first = False
+            self.copy()
+
+    def text(self):
+        return self.buffer.get_text(self.buffer.get_start_iter(), self.buffer.get_end_iter(), False)
+
+    def copy(self):
+        self._copy_text(self.text())
+        self._update_status(True)
+
+    def _update_status(self, copied):
+        n = len(self.text())
+        self.status.set_text(f"{n} characters" + (" - copied to the clipboard" if copied else ""))

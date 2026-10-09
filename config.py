@@ -32,6 +32,8 @@ DEFAULTS = {
     "last_saved": "",
     "capture_delay_ms": 0,
     "last_region": None,                # {"monitor": "DP-2", "x": .., "y": .., "w": .., "h": ..} in that monitor's real pixels
+    # text recognition
+    "ocr_lang": "eng",                  # a Tesseract language code, e.g. "eng" or "eng+fra"
     # screen recording
     "record_dir": "~/Videos/Screencasts",
     "record_name": "Recording_${YYYY}-${MM}-${DD}_${hh}-${mm}-${ss}",

@@ -61,11 +61,17 @@ UI = {
     "pointer": _UI + '<path d="M6 3.5 V18.5 L9.8 15 L12.6 20.5 L15 19.3 L12.2 13.9 L17.6 13.7 Z" fill="#fff"/></svg>',
     "window": _UI + '<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M3.5 9 H20.5"/></svg>',
     "screen": _UI + '<rect x="3" y="4.5" width="18" height="12" rx="1.8"/><path d="M9 20 H15 M12 16.5 V20"/></svg>',
+    "text": _UI + '<path d="M4.5 6.5 V4.5 H12 M8.2 4.5 V14.5 M5.6 14.5 H10.8"/><path d="M14.5 10.5 H20 M14.5 14 H20 M4.5 18.5 H20 M14.5 7 H20"/></svg>',
     "stop": _UI + '<rect x="6" y="6" width="12" height="12" rx="2" fill="#fff"/></svg>',
 }
 
 # The tray icon while a recording is running: the app icon with a red dot.
 RECORDING_ICON = APP_ICON.replace("</svg>", '<circle cx="47" cy="47" r="12.5" fill="#ef4444" stroke="#fff" stroke-width="3.5"/></svg>')
+
+
+# ... and with an amber pause mark while a recording is paused.
+PAUSED_ICON = APP_ICON.replace("</svg>", '<circle cx="47" cy="47" r="12.5" fill="#f59e0b" stroke="#fff" stroke-width="3.5"/>'
+                                        '<path d="M43.6 41.5 V52.5 M50.4 41.5 V52.5" stroke="#fff" stroke-width="3.2" stroke-linecap="round"/></svg>')
 
 
 def ui_image(name, size=18):

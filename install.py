@@ -34,7 +34,7 @@ if "--uninstall" in sys.argv:
             os.remove(path)
     shutil.rmtree(target, ignore_errors=True)
     if not dev:
-        for f in ("snipshot.svg", "snipshot-recording.svg"):
+        for f in ("snipshot.svg", "snipshot-recording.svg", "snipshot-paused.svg"):
             p = os.path.join(icon_dir, f)
             if os.path.exists(p):
                 os.remove(p)
@@ -64,7 +64,8 @@ import icons  # noqa: E402
 # The dev copy keeps its icons in its own folder (the app writes them there itself); the normal install shares the theme.
 if not dev:
     os.makedirs(icon_dir, exist_ok=True)
-    for fname, svg in (("snipshot.svg", icons.APP_ICON), ("snipshot-recording.svg", icons.RECORDING_ICON)):
+    for fname, svg in (("snipshot.svg", icons.APP_ICON), ("snipshot-recording.svg", icons.RECORDING_ICON),
+                       ("snipshot-paused.svg", icons.PAUSED_ICON)):
         with open(os.path.join(icon_dir, fname), "w") as fh:
             fh.write(svg)
 

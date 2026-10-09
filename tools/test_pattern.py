@@ -12,6 +12,8 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import GLib, Gtk  # noqa: E402
 
 animate = "--static" not in sys.argv
+# --text STRING: white background with that text in large black letters at (100, 150) - for the OCR tests
+text = sys.argv[sys.argv.index("--text") + 1] if "--text" in sys.argv else None
 # --window W H: a plain window of that size instead of full screen; --resize-to W H SECONDS: it changes size later
 size = resize = None
 if "--window" in sys.argv:
@@ -32,6 +34,15 @@ class Area(Gtk.DrawingArea):
             self.add_tick_callback(lambda w, clock: (w.queue_draw(), True)[1])
 
     def draw(self, _a, cr, w, h):
+        if text:
+            cr.set_source_rgb(1, 1, 1)
+            cr.paint()
+            cr.set_source_rgb(0.05, 0.05, 0.05)
+            cr.select_font_face("DejaVu Sans")
+            cr.set_font_size(44)
+            cr.move_to(100, 150)
+            cr.show_text(text)
+            return
         for i, rgb in enumerate(((1, 0, 0), (0, 1, 0), (0, 0, 1))):
             cr.set_source_rgb(*rgb)
             cr.rectangle(i * w / 3, 0, w / 3 + 1, h)

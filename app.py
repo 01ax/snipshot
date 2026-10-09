@@ -10,9 +10,11 @@ from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
 
 import capture as CAP  # noqa: E402
 import config as CFG  # noqa: E402
+import dialogs as DLG  # noqa: E402
 import editor as ED  # noqa: E402
 import imaging as im  # noqa: E402
 import model as M  # noqa: E402
+import ocr as OCR  # noqa: E402
 import output  # noqa: E402
 import icons as IC  # noqa: E402
 import picker as PK  # noqa: E402
@@ -33,9 +35,11 @@ def _log(*a):
 USAGE = """Snipshot - screenshot and screen recording tool
 
   snipshot region                capture a region (drag to select; the bar at the top switches to recording)
+  snipshot ocr                   the same overlay in Text mode: drag over text and it is copied to the clipboard
   snipshot record                the same overlay, opened in Record mode (run it again to stop a recording)
   snipshot record screen [NAME]  record a whole screen: left, right, a name like DP-2, or the primary one
   snipshot record window         record one window (the desktop's own picker)
+  snipshot record pause          pause the running recording (run it again to resume)
   snipshot record stop           stop and save the running recording
   snipshot fullscreen [SCREEN]   capture the desktop: all (default), left, right, top, bottom or a name like DP-2
   snipshot window                capture a window (the desktop's own picker)
@@ -71,6 +75,7 @@ scale value { font-size: 12px; font-weight: 600; }
 .snipshot-toolbar button:hover { background: rgba(255,255,255,.14); }
 .snipshot-toolbar button:checked { background: #1c71d8; }
 .snipshot-toolbar button.rec:checked { background: #d62828; }
+.snipshot-toolbar button.ocr:checked { background: #1f9d55; }
 .snipshot-toolbar separator { background: rgba(255,255,255,.22); min-width: 1px; min-height: 22px; margin: 3px 6px; }
 .snipshot-arm button.start { background: #d62828; font-weight: 700; padding: 6px 14px; }
 .snipshot-arm button.start:hover { background: #ef4444; }
@@ -140,6 +145,7 @@ class SnipshotApp(Gtk.Application):
         self._countdown_secs = 0
         self._quit_when_saved = False
         self._awake_cookie = 0
+        self._ocr_win = None
 
     # ------------------------------------------------------------------ lifecycle
     def do_startup(self):
@@ -172,7 +178,8 @@ class SnipshotApp(Gtk.Application):
         folder = os.path.join(self.data_dir(), "icons", "hicolor", "scalable", "apps")
         try:
             os.makedirs(folder, exist_ok=True)
-            for name, svg in (("snipshot.svg", IC.APP_ICON), ("snipshot-recording.svg", IC.RECORDING_ICON)):
+            for name, svg in (("snipshot.svg", IC.APP_ICON), ("snipshot-recording.svg", IC.RECORDING_ICON),
+                              ("snipshot-paused.svg", IC.PAUSED_ICON)):
                 path = os.path.join(folder, name)
                 try:
                     same = open(path, encoding="utf-8").read() == svg
@@ -191,8 +198,8 @@ class SnipshotApp(Gtk.Application):
             self.tray = None
         if want_tray:
             self._ensure_icons()
-            live = self.job is not None and self.job.state in ("recording", "stopping")
-            self.tray = TR.TrayIcon(CFG.DISPLAY_NAME, "snipshot-recording" if live else "snipshot", self._tray_items(),
+            state = self.job.state if self.job is not None else None
+            self.tray = TR.TrayIcon(CFG.DISPLAY_NAME, "snipshot-paused" if state == "paused" else "snipshot-recording" if state in ("recording", "stopping") else "snipshot", self._tray_items(),
                                     icon_theme_path=os.path.join(self.data_dir(), "icons", "hicolor", "scalable", "apps"),
                                     on_activate=self._tray_clicked, app_id=CFG.APP_NAME)
             self.tray.start()
@@ -223,11 +230,14 @@ class SnipshotApp(Gtk.Application):
         items = []
         if self.job is not None:                       # first entry while recording: the timer + stop (kept at index 0)
             items.append(it(self._stop_label(), self.stop_recording))
+            if self.job.state in ("recording", "paused"):
+                items.append(it(self._pause_label(), self.pause_recording))
             items.append(None)
         items += [it("Capture region", self.capture_region), it("Capture last region", self.capture_last),
                   it("Capture window", self.capture_window), it("Capture full screen", self.capture_fullscreen)]
         for label, arg in self._screen_names():
             items.append(it(f"Capture screen {label}", lambda a=arg: self.capture_fullscreen(a)))
+        items += [it("Copy text from the screen (OCR)...", lambda: self.capture_region(mode="ocr"))]
         items += [None, it("Capture region in 3 seconds", lambda: self.capture_region(delay=3)),
                   it("Capture region in 5 seconds", lambda: self.capture_region(delay=5)),
                   it("Capture full screen in 5 seconds", lambda: self.capture_fullscreen(delay=5)),
@@ -311,6 +321,8 @@ class SnipshotApp(Gtk.Application):
             print(USAGE)
         elif cmd == "region":
             self.capture_region(delay=delay)
+        elif cmd == "ocr":
+            self.capture_region(delay=delay, mode="ocr")
         elif cmd == "record":
             self.record_command(rest[1] if len(rest) > 1 else None, rest[2] if len(rest) > 2 else None, delay, audio)
         elif cmd == "fullscreen":
@@ -332,7 +344,7 @@ class SnipshotApp(Gtk.Application):
 
     # ------------------------------------------------------------------ capture pipeline
     def _hide_editors(self):
-        self._hidden = [w for w in self.editors if w.get_visible()]
+        self._hidden = [w for w in self.editors + ([self._ocr_win] if self._ocr_win is not None else []) if w.get_visible()]
         for w in self._hidden:
             w.set_visible(False)
 
@@ -397,6 +409,9 @@ class SnipshotApp(Gtk.Application):
                 self.begin_recording({"kind": "window"}, result["opts"], rec_delay)
             else:
                 self.capture_window()
+            return
+        if result["mode"] == "ocr":
+            self.run_ocr(result["array"])
             return
         if result["mode"] == "record":
             info = result["shot"].info
@@ -477,10 +492,44 @@ class SnipshotApp(Gtk.Application):
         cursor = CAP.cursor_in_region(shot, region) if self.cfg["capture_cursor"] else None
         self.captured(shot.array[y:y + rh, x:x + rw].copy(), cursor, "Region")
 
+    # ------------------------------------------------------------------ text recognition (OCR)
+    def run_ocr(self, arr):
+        """Recognise the text in ``arr`` off the GUI thread, put it on the clipboard and say what happened."""
+        if not OCR.available():
+            return self._notify(OCR.INSTALL_HINT, force=True)
+        import threading
+        lang = self.cfg["ocr_lang"]
+
+        def work():
+            text, err = OCR.recognize(arr, lang)
+            GLib.idle_add(self._ocr_done, text, err)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _ocr_done(self, text, err):
+        if err:
+            self._notify(err, force=True)
+        elif not text:
+            self._notify("No text was found in that area.", force=True)
+        else:
+            preview = " ".join(text.split())
+            _log(f"ocr: showing {len(text)} characters: {preview[:90]}")
+            if self._ocr_win is not None:
+                self._ocr_win.destroy()
+            self._ocr_win = DLG.OcrResultWindow(text, output.copy_text)
+            self._ocr_win.connect("close-request", lambda *_: (setattr(self, "_ocr_win", None), False)[1])
+            self._ocr_win.present()
+        return False
+
     # ------------------------------------------------------------------ screen recording
     def record_command(self, what=None, arg=None, delay=None, audio=None):
         """``snipshot record [stop | screen [NAME] | window]``. With nothing running it opens the overlay in Record mode;
         while a recording runs, any ``record`` command stops it (so the same shortcut starts and stops)."""
+        if what in ("pause", "resume"):
+            if self.job is None or self.job.state not in ("recording", "paused"):
+                return self._notify("Nothing is being recorded.", force=True)
+            if what == "pause" or self.job.state == "paused":      # "pause" toggles; "resume" only resumes
+                self.pause_recording()
+            return
         if self.job is not None:
             return self.stop_recording()
         if what == "stop":
@@ -555,7 +604,7 @@ class SnipshotApp(Gtk.Application):
                 self._countdown.present()
             else:
                 GLib.timeout_add(120, lambda: (job.begin(), False)[1])
-        elif state == "recording":
+        elif state in ("recording", "paused"):
             self._keep_awake(True)
             self._refresh_tray()
         elif state == "stopping":
@@ -563,20 +612,34 @@ class SnipshotApp(Gtk.Application):
                 self.tray.set_item_label(0, "Saving the recording...")
 
     def _stop_label(self):
-        t = REC.fmt_time(self.job.elapsed) if self.job is not None and self.job.state == "recording" else None
-        return f"Stop recording ({t})" if t else "Cancel recording"
+        live = self.job is not None and self.job.state in ("recording", "paused")
+        t = REC.fmt_time(self.job.elapsed) if live else None
+        if not t:
+            return "Cancel recording"
+        return f"Stop recording ({t}{', paused' if self.job.state == 'paused' else ''})"
+
+    def _pause_label(self):
+        return "Resume recording" if self.job is not None and self.job.state == "paused" else "Pause recording"
+
+    def pause_recording(self):
+        """Pause, or resume if already paused."""
+        if self.job is not None and self.job.state in ("recording", "paused"):
+            self.job.toggle_pause()
 
     def _rec_tick(self, seconds):
-        if self.tray and self.job is not None and self.job.state == "recording":
+        if self.tray and self.job is not None and self.job.state in ("recording", "paused"):
             self.tray.set_item_label(0, self._stop_label())
-            self.tray.set_tooltip(f"Recording {REC.fmt_time(seconds)} - click to stop")
+            paused = self.job.state == "paused"
+            self.tray.set_tooltip(f"{'Paused at' if paused else 'Recording'} {REC.fmt_time(seconds)} - use the menu to "
+                                  f"{'resume or ' if paused else 'pause or '}stop")
 
     def _refresh_tray(self):
         if self.tray is None:
             return
-        live = self.job is not None and self.job.state in ("recording", "stopping")      # red only once frames are being kept
-        self.tray.set_icon("snipshot-recording" if live else "snipshot")
-        self.tray.set_tooltip("Recording - click to stop" if live else "")
+        state = self.job.state if self.job is not None else None
+        # red only once frames are being kept, amber while paused
+        self.tray.set_icon("snipshot-paused" if state == "paused" else "snipshot-recording" if state in ("recording", "stopping") else "snipshot")
+        self.tray.set_tooltip({"recording": "Recording - use the menu to pause or stop", "paused": "Recording paused - use the menu to resume or stop"}.get(state, ""))
         self.tray.set_items(self._tray_items())
 
     def _keep_awake(self, on):
@@ -772,11 +835,11 @@ class SnipshotApp(Gtk.Application):
     def show_preferences(self, parent=None):
         PR.PrefsWindow(self, parent).present()
 
-    def _notify(self, text, path=None, recording=False):
+    def _notify(self, text, path=None, recording=False, force=False):
         """A desktop notification. With ``path`` the notification opens that file when clicked and offers "Show in
         folder". Recordings use a normal-priority notification so the banner (and its buttons) is really shown."""
         _log("notify:", text)
-        if not self.cfg.get("show_notifications", True):
+        if not self.cfg.get("show_notifications", True) and not force:       # (force: the answer to a click, e.g. OCR)
             return
         n = Gio.Notification.new(CFG.DISPLAY_NAME)
         n.set_body(text)

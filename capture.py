@@ -6,8 +6,8 @@
 * ``RegionSelector`` shows each monitor's frozen frame 1:1 on a full-screen window per monitor and lets you drag a
   rectangle, like Greenshot's region capture (M toggles the mouse cursor, Z the zoomer, Esc cancels).
   The selection stays on the monitor where you started dragging, so the result is always real pixels.
-  A toolbar at the top switches the same overlay between taking a screenshot and recording the screen (S / R keys);
-  in record mode it also holds the system-sound and microphone switches.
+  A toolbar at the top switches the same overlay between taking a screenshot, recording the screen and copying text
+  out of the picture with OCR (G / R / O keys); record mode also holds the system-sound and microphone switches.
 """
 import os
 import random
@@ -194,6 +194,7 @@ def _texture(arr):
 DIM = Gdk.RGBA(red=0, green=0, blue=0, alpha=0.38)
 LINE = Gdk.RGBA(red=0.11, green=0.52, blue=1.0, alpha=1.0)
 LINE_REC = Gdk.RGBA(red=0.94, green=0.27, blue=0.27, alpha=1.0)        # the outline turns red in record mode
+LINE_OCR = Gdk.RGBA(red=0.20, green=0.78, blue=0.45, alpha=1.0)        # ... and green when copying text
 CROSS = Gdk.RGBA(red=1, green=1, blue=1, alpha=0.6)
 PILL = Gdk.RGBA(red=0.04, green=0.04, blue=0.07, alpha=0.88)
 WHITE = Gdk.RGBA(red=1, green=1, blue=1, alpha=1)
@@ -265,9 +266,13 @@ class _Toolbar(Gtk.Box):
         self.b_shot, _ = self._toggle("camera", "Screenshot", "Take a screenshot  (G)")
         self.b_rec, _ = self._toggle("record", "Record", "Record the screen  (R)")
         self.b_rec.add_css_class("rec")
+        self.b_ocr, _ = self._toggle("text", "Text", "Copy the text in an area (OCR)  (O)")
+        self.b_ocr.add_css_class("ocr")
         self.b_rec.set_group(self.b_shot)
+        self.b_ocr.set_group(self.b_shot)
         self.b_shot.connect("toggled", lambda b: self._mode("screenshot", b))
         self.b_rec.connect("toggled", lambda b: self._mode("record", b))
+        self.b_ocr.connect("toggled", lambda b: self._mode("ocr", b))
         self.sep_rec = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
         self.b_sys, self.img_sys = self._toggle("speaker", "System sound", "Record the sound your computer plays  (A)")
         self.b_mic, self.img_mic = self._toggle("mic", "Microphone", "Record your microphone  (V)")
@@ -275,7 +280,7 @@ class _Toolbar(Gtk.Box):
         self.sep_tail = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
         self.b_window = self._button("window", "Window...", "Pick a window to capture or record")
         self.b_screen = self._button("screen", "This screen", "Capture or record this whole screen  (Enter)")
-        for w in (self.b_shot, self.b_rec, self.sep_rec, self.b_sys, self.b_mic, self.b_ptr, self.sep_tail,
+        for w in (self.b_shot, self.b_rec, self.b_ocr, self.sep_rec, self.b_sys, self.b_mic, self.b_ptr, self.sep_tail,
                   self.b_window, self.b_screen):
             self.append(w)
         self.b_sys.connect("toggled", lambda b: self._flag("system", b))
@@ -315,10 +320,12 @@ class _Toolbar(Gtk.Box):
     def sync(self):
         """Show the selector's current state (called whenever it changes, from any monitor's toolbar)."""
         sel = self.selector
-        rec = sel.mode == "record"
+        mode = sel.mode
+        rec = mode == "record"
         self._syncing = True
+        self.b_shot.set_active(mode == "screenshot")
         self.b_rec.set_active(rec)
-        self.b_shot.set_active(not rec)
+        self.b_ocr.set_active(mode == "ocr")
         self.b_sys.set_active(sel.rec["system"])
         self.b_mic.set_active(sel.rec["mic"])
         self.b_ptr.set_active(sel.cursor_on)
@@ -326,6 +333,8 @@ class _Toolbar(Gtk.Box):
         self.img_mic.set_from_paintable(IC.texture(IC.UI["mic" if sel.rec["mic"] else "mic-off"]))
         for w in (self.sep_rec, self.b_sys, self.b_mic):
             w.set_visible(rec)
+        for w in (self.b_ptr, self.b_window):                 # meaningless when only the text is wanted
+            w.set_visible(mode != "ocr")
         self._syncing = False
 
 
@@ -433,7 +442,10 @@ class _MonitorWindow(Gtk.Window):
         elif keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
             s.enter(self.index)                  # Enter: start the armed recording, or take this whole monitor
         elif keyval in (Gdk.KEY_m, Gdk.KEY_M):
-            s.set_flag("cursor", not s.cursor_on)
+            if s.mode != "ocr":
+                s.set_flag("cursor", not s.cursor_on)
+        elif keyval in (Gdk.KEY_o, Gdk.KEY_O):
+            s.set_mode("ocr")
         elif keyval in (Gdk.KEY_r, Gdk.KEY_R):
             s.set_mode("record")
         elif keyval in (Gdk.KEY_s, Gdk.KEY_S, Gdk.KEY_g, Gdk.KEY_G):       # G: back to screenshots (as in Alt+Shift+G)
@@ -470,10 +482,10 @@ class _MonitorWindow(Gtk.Window):
             snap.append_color(DIM, _rect(cx1, cy0, w - cx1, cy1 - cy0))
             outline = Gsk.RoundedRect()
             outline.init_from_rect(_rect(lx, ly, rw, rh), 0)
-            line = LINE_REC if sel.mode == "record" else LINE
+            line = LINE_REC if sel.mode == "record" else LINE_OCR if sel.mode == "ocr" else LINE
             snap.append_border(outline, [1.5] * 4, [line] * 4)
             _nx, _ny, nw_, nh_ = logical_to_native((lx, ly, rw, rh), self.shot.info, self.nw, self.nh)
-            label = f"{nw_} x {nh_}" + ("  (recording area)" if sel.mode == "record" else "")
+            label = f"{nw_} x {nh_}" + {"record": "  (recording area)", "ocr": "  (text to copy)"}.get(sel.mode, "")
             self._pill(widget, snap, label, max(4.0, min(cx0, w - 120.0)), cy0 - 30 if cy0 > 34 else cy1 + 6)
         else:
             snap.append_color(DIM, _rect(0, 0, w, h))
@@ -485,12 +497,15 @@ class _MonitorWindow(Gtk.Window):
             self._loupe(snap, w, h, sh.hover[0] - self.mx, sh.hover[1] - self.my)
         if self.index == 0 and sh.start is None:
             cur = "on" if sel.cursor_on else "off"
-            if sel.mode == "record":
+            if sel.mode == "ocr":
+                text = ("Drag over the text to copy it  -  Enter: this whole screen  -  G: screenshot mode  -  "
+                        "R: record mode  -  Esc: cancel")
+            elif sel.mode == "record":
                 text = (f"Drag to choose what to record  -  Enter: this whole screen  -  A: system sound  -  "
-                        f"V: microphone  -  M: mouse pointer ({cur})  -  G: screenshot mode  -  Esc: cancel")
+                        f"V: microphone  -  M: mouse pointer ({cur})  -  G: screenshot mode  -  O: copy text  -  Esc: cancel")
             else:
                 text = (f"Drag to capture a region  -  Enter: this screen  -  M: mouse cursor ({cur})  -  "
-                        f"Z: zoomer  -  R: record mode  -  Esc: cancel")
+                        f"Z: zoomer  -  R: record mode  -  O: copy text  -  Esc: cancel")
             self._pill(widget, snap, text, max(8.0, w / 2 - 330), 74)
 
     def _loupe(self, snap, w, h, px, py):
@@ -535,7 +550,7 @@ class RegionSelector:
         self.shots = shots
         self.on_done = on_done
         self.include_cursor = include_cursor
-        self.mode = mode if mode in ("screenshot", "record") else "screenshot"
+        self.mode = mode if mode in ("screenshot", "record", "ocr") else "screenshot"
         self.rec = dict(system=True, mic=False, cursor=True)       # recording options, edited in the toolbar
         self.rec.update(rec or {})
         self.zoomer = True
@@ -552,6 +567,8 @@ class RegionSelector:
     # -- toolbar state
     @property
     def cursor_on(self):
+        if self.mode == "ocr":
+            return False
         return self.rec["cursor"] if self.mode == "record" else self.include_cursor
 
     def sync_toolbars(self):
@@ -704,6 +721,6 @@ class RegionSelector:
             self.on_done(dict(mode="record", target="screen" if whole else "region", monitor=shot.info.connector,
                               region=region, opts=opts, shot=shot))
             return
-        self.on_done(dict(mode="screenshot", target="region", array=shot.array[y:y + rh, x:x + rw].copy(),
+        self.on_done(dict(mode=mode, target="region", array=shot.array[y:y + rh, x:x + rw].copy(),
                           monitor=shot.info.connector, region=region, opts=opts, shot=shot,
-                          cursor=cursor_in_region(shot, region) if self.include_cursor else None))
+                          cursor=cursor_in_region(shot, region) if (self.include_cursor and mode == "screenshot") else None))

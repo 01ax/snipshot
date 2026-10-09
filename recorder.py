@@ -206,18 +206,32 @@ def _video_encoder(fmt, quality, fps, out_h):
                 f"target-bitrate=30000000 keyframe-max-dist={fps * 2}")
     preset = "superfast" if out_h > 1440 else "veryfast"          # 4K needs a faster preset to keep up in real time
     return (f"x264enc pass=quant quantizer={q['x264']} speed-preset={preset} bframes=0 key-int-max={fps * 2} "
-            f"threads=0 ! video/x-h264,profile=high,stream-format=avc,alignment=au")
+            # sliced-threads: the encoder works on one frame at a time across several cores instead of holding a queue of
+            # frames in flight. Costs about 1-3% in file size, but a requested key frame (after a pause) appears within
+            # one frame instead of ~0.4 s, which keeps picture and sound in step.
+            f"sliced-threads=true threads=8 rc-lookahead=0 ! video/x-h264,profile=high,stream-format=avc,alignment=au")
 
 
-def _audio_source(a, idx):
+# Audio capture settings (module level so the audio quality probe can compare them).
+# do_timestamp must stay False: pulsesrc already stamps its buffers from the sound device's own clock, and do-timestamp
+# would overwrite that with the (jittery) moment each buffer was handed over. That made system sound crackle: measured
+# with tools/audio_probe.py, 100 ms windows of a pure tone dropped to 9-12 dB purity with it, vs 35-60 dB without.
+# provide_clock=True was worse still when two sources are mixed. A single source skips the mixer altogether.
+AUDIO = dict(do_timestamp=False, provide_clock=False, slave="skew", buffer_ms=200, latency_ms=20, mixer_latency_ms=100,
+             bypass_single=True)
+
+
+def _audio_source(a, idx, into):
     if a.get("kind") == "test":
         head = f"audiotestsrc is-live=true wave=sine freq={a.get('freq', 440.0)} volume=0.2"
     else:
         dev = a.get("device")
         dev_prop = f' device="{dev}"' if dev else ""
-        head = f"pulsesrc{dev_prop} provide-clock=false do-timestamp=true buffer-time=200000 latency-time=20000"
+        t = AUDIO
+        head = (f"pulsesrc{dev_prop} provide-clock={str(t['provide_clock']).lower()} do-timestamp={str(t['do_timestamp']).lower()} "
+                f"slave-method={t['slave']} buffer-time={t['buffer_ms'] * 1000} latency-time={t['latency_ms'] * 1000}")
     return (f"{head} ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2 ! "
-            f"queue max-size-time=5000000000 max-size-buffers=0 max-size-bytes=0 ! amix.")
+            f"queue max-size-time=5000000000 max-size-buffers=0 max-size-bytes=0 ! {into}.")
 
 
 def build_pipeline(video, audio, out_path, fmt="mp4", fps=30, quality="medium"):
@@ -232,12 +246,18 @@ def build_pipeline(video, audio, out_path, fmt="mp4", fps=30, quality="medium"):
     head, extra = _video_source(video, fps)
     vchain = (f"{head} ! videoconvert ! video/x-raw,format=I420 ! videorate ! "
               f"video/x-raw,framerate={fps}/1 ! queue name=vq max-size-time=3000000000 max-size-buffers=0 "
-              f"max-size-bytes=0 ! {_video_encoder(fmt, quality, fps, out_h)} ! queue ! mux.")
+              f"max-size-bytes=0 ! {_video_encoder(fmt, quality, fps, out_h)} ! queue name=vout ! mux.")
     parts = [mux, vchain] + extra
     if audio:
         aenc = "avenc_aac bitrate=160000" if fmt == "mp4" else "opusenc bitrate=128000"
-        parts.append(f"audiomixer name=amix ! audioconvert ! {aenc} ! queue ! mux.")
-        parts += [_audio_source(a, i) for i, a in enumerate(audio)]
+        # sources -> (mixer when there are two) -> audioconvert -> encoder -> muxer
+        parts.append(f"audioconvert name=aprep ! {aenc} ! queue name=aout ! mux.")
+        if len(audio) == 1 and AUDIO["bypass_single"]:
+            into = "aprep"
+        else:
+            into = "amix"
+            parts.append(f"audiomixer name=amix start-time-selection=first latency={AUDIO['mixer_latency_ms'] * 1000000} ! aprep.")
+        parts += [_audio_source(a, i, into) for i, a in enumerate(audio)]
     return " ".join(parts)
 
 
@@ -257,8 +277,10 @@ class Recorder:
         self.part_path = out_path + ".part"
         self.on_done = on_done or (lambda path, err: None)
         self.pipeline = None
-        self.state = "idle"                    # idle -> recording -> stopping -> done | failed
+        self.state = "idle"                    # idle -> recording <-> paused -> stopping -> done | failed
         self.t_start = None
+        self._paused_total = 0.0               # seconds spent paused so far (taken out of the timeline)
+        self._pause_t = None
         self.warning = None                    # set when the file is usable but the recording ended early
         self._stop_timer = 0
         self._finished = False
@@ -278,6 +300,7 @@ class Recorder:
         except (OSError, GLib.Error) as e:
             self._finish(None, f"Could not start recording: {getattr(e, 'message', e)}")
             return
+        self._install_gates()
         if self.video.get("window"):
             self._wsrc = self.pipeline.get_by_name("wsrc")
             self._wcaps = None
@@ -328,10 +351,75 @@ class Recorder:
 
     @property
     def elapsed(self):
-        return 0.0 if self.t_start is None else time.monotonic() - self.t_start
+        """Seconds of recording so far, not counting time spent paused."""
+        if self.t_start is None:
+            return 0.0
+        now = time.monotonic()
+        paused = self._paused_total + ((now - self._pause_t) if self.state == "paused" and self._pause_t else 0.0)
+        return max(0.0, now - self.t_start - paused)
+
+    # ------------------------------------------------------------------ pause / resume
+    # The pause happens on the ENCODED packets, just before the muxer. Gating or re-timing the raw frames earlier in the
+    # chain corrupted the picture's timeline (the encoder holds many frames internally, so a change made upstream
+    # reaches the file out of order, and with a PipeWire screen stream it also delayed the end of the recording).
+    # Encoded packets are small and nothing is buffered behind them; the screen and microphone keep running underneath.
+    def _install_gates(self):
+        self._gate = {k: dict(shift=0, last_end=None, pending=False) for k in ("video", "audio")}
+        for kind, name in (("video", "vout"), ("audio", "aout")):
+            el = self.pipeline.get_by_name(name)
+            if el is not None:
+                el.get_static_pad("sink").add_probe(Gst.PadProbeType.BUFFER, self._gate_packet, kind)
+
+    def _gate_packet(self, _pad, info, kind):
+        """Streaming thread, once per packet: drop it while paused, and re-time what is kept so the paused stretch
+        leaves no hole (each stream continues exactly where its last kept packet ended)."""
+        if self.state == "paused":
+            return Gst.PadProbeReturn.DROP
+        g = self._gate[kind]
+        buf = info.get_buffer()
+        none = Gst.CLOCK_TIME_NONE
+        if g["pending"]:
+            if kind == "video" and buf.has_flags(Gst.BufferFlags.DELTA_UNIT):
+                return Gst.PadProbeReturn.DROP               # the picture can only restart on a key frame
+            if g["last_end"] is not None and buf.pts != none:
+                g["shift"] = buf.pts - g["last_end"]
+            g["pending"] = False
+        if g["shift"]:
+            if buf.pts != none:
+                buf.pts -= g["shift"]
+            if buf.dts != none:
+                buf.dts -= g["shift"]
+        if buf.pts != none:
+            g["last_end"] = buf.pts + (buf.duration if buf.duration != none else 0)
+        return Gst.PadProbeReturn.OK
+
+    def pause(self):
+        """Stop writing picture and sound to the file. The screen and microphone streams keep running underneath."""
+        if self.state != "recording":
+            return False
+        self._pause_t = time.monotonic()
+        self.state = "paused"
+        return True
+
+    def resume(self):
+        """Carry on: both streams are re-timed to continue right after what was kept (the paused stretch is cut out,
+        nothing freezes) and the picture restarts on a fresh key frame, which is asked for here."""
+        if self.state != "paused":
+            return False
+        self._paused_total += time.monotonic() - self._pause_t
+        self._pause_t = None
+        for g in self._gate.values():
+            g["pending"] = True
+        vout = self.pipeline.get_by_name("vout")
+        if vout is not None:
+            vout.get_static_pad("sink").push_event(GstVideo.video_event_new_upstream_force_key_unit(Gst.CLOCK_TIME_NONE, True, 0))
+        self.state = "recording"
+        return True
 
     def stop(self, timeout_s=10):
         """Finish the file: send end-of-stream so the muxer can write its index, then wait for it."""
+        if self.state == "paused":
+            self.resume()
         if self.state != "recording":
             return
         self.state = "stopping"
@@ -354,7 +442,7 @@ class Recorder:
 
     def stop_early(self, reason):
         """The source went away (screen locked, window closed...): finish what has been recorded so far."""
-        if self.state == "recording":
+        if self.state in ("recording", "paused"):
             self.warning = reason
             self.stop(timeout_s=4)
             # a source that is already gone never passes the end-of-stream on, so push it into the video chain ourselves
@@ -380,15 +468,17 @@ class Recorder:
 
     def _on_message(self, _bus, msg):
         if msg.type == Gst.MessageType.EOS:
-            if self.state == "recording":                      # the source ended by itself
+            if self.state in ("recording", "paused"):          # the source ended by itself
                 self.warning = self.warning or "The screen capture ended before you stopped the recording"
             self._finish(self.final_path, None)
         elif msg.type == Gst.MessageType.ERROR:
             err, _dbg = msg.parse_error()
-            if self.state in ("recording", "stopping") and self._has_content():
+            if self.state in ("recording", "paused", "stopping") and self._has_content():
                 # keep what was recorded: try to close the file properly, else keep the fragments
                 self.warning = self.warning or f"The recording ended early: {err.message}"
-                if self.state == "recording":
+                if self.state in ("recording", "paused"):
+                    if self.state == "paused":
+                        self.resume()
                     self.state = "stopping"
                     self._send_eos()
                 if not self._stop_timer:
