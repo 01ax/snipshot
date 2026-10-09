@@ -10,8 +10,13 @@ import socket
 import getpass
 from datetime import datetime
 
-APP_NAME = "snipshot"
-CONFIG_DIR = os.environ.get("SNIPSHOT_CONFIG_DIR") or os.path.expanduser("~/.config/snipshot")
+# SNIPSHOT_CHANNEL=dev runs a side-by-side test copy that shares nothing with the normal install: its own application
+# id (so both can run at once), settings folder, launcher name and icon name.
+CHANNEL = os.environ.get("SNIPSHOT_CHANNEL", "").strip().lower()
+APP_NAME = "snipshot" + (f"-{CHANNEL}" if CHANNEL else "")
+APP_ID = "local.snipshot" + (f".{CHANNEL}" if CHANNEL else "")
+DISPLAY_NAME = "Snipshot" + (f" ({CHANNEL})" if CHANNEL else "")
+CONFIG_DIR = os.environ.get("SNIPSHOT_CONFIG_DIR") or os.path.expanduser(f"~/.config/{APP_NAME}")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 
 DEFAULTS = {
@@ -27,6 +32,19 @@ DEFAULTS = {
     "last_saved": "",
     "capture_delay_ms": 0,
     "last_region": None,                # {"monitor": "DP-2", "x": .., "y": .., "w": .., "h": ..} in that monitor's real pixels
+    # screen recording
+    "record_dir": "~/Videos/Screencasts",
+    "record_name": "Recording_${YYYY}-${MM}-${DD}_${hh}-${mm}-${ss}",
+    "record_format": "mp4",             # mp4 (H.264 + AAC) | webm (VP8 + Opus)
+    "record_fps": 30,
+    "record_quality": "medium",         # high | medium | low
+    "record_countdown": 3,              # seconds between pressing Record and the first frame
+    "record_system_audio": True,        # what you hear (the default output's monitor)
+    "record_mic": False,
+    "record_cursor": True,
+    "record_system_device": "",         # "" = the default output; otherwise a sink's node name
+    "record_mic_device": "",            # "" = the default microphone; otherwise a source's node name
+    "last_recording": "",
     # editor
     "zoom_fit_on_open": True,
     "confirm_close_unsaved": True,
@@ -40,6 +58,7 @@ DEFAULTS = {
 }
 
 FORMATS = ("png", "jpg", "webp", "bmp", "tiff")
+RECORD_FORMATS = ("mp4", "webm")
 EXT = {"png": "png", "jpg": "jpg", "webp": "webp", "bmp": "bmp", "tiff": "tiff"}
 
 
@@ -65,6 +84,12 @@ class Config(dict):
         if self["format"] not in FORMATS:
             self["format"] = "png"
         self["jpg_quality"] = min(100, max(1, int(self["jpg_quality"])))
+        if self["record_format"] not in RECORD_FORMATS:
+            self["record_format"] = "mp4"
+        if self["record_quality"] not in ("high", "medium", "low"):
+            self["record_quality"] = "medium"
+        self["record_fps"] = min(60, max(5, int(self["record_fps"])))
+        self["record_countdown"] = min(30, max(0, int(self["record_countdown"])))
 
     def save(self):
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
@@ -76,6 +101,10 @@ class Config(dict):
     @property
     def folder(self):
         return os.path.expanduser(self["output_dir"])
+
+    @property
+    def record_folder(self):
+        return os.path.expanduser(self["record_dir"])
 
     def remember_file(self, path, limit=10):
         rec = [p for p in self["recent_files"] if p != path]
@@ -117,3 +146,8 @@ def unique_path(folder, base, ext):
 def next_save_path(cfg, when=None, title=""):
     base = expand_pattern(cfg["filename_pattern"], when, title)
     return unique_path(cfg.folder, base, EXT.get(cfg["format"], "png"))
+
+
+def next_record_path(cfg, when=None, fmt=None):
+    base = expand_pattern(cfg["record_name"], when, title="Recording")
+    return unique_path(cfg.record_folder, base, fmt or cfg["record_format"])
