@@ -50,6 +50,7 @@ USAGE = """Snipshot - screenshot and screen recording tool
   snipshot --daemon              start in the background with the tray icon
   snipshot prefs                 open preferences
   snipshot --quit                stop the background instance
+  snipshot --version             print the version
 
   --delay SECONDS                wait before capturing (works with region, fullscreen, window, lastregion);
                                  for recordings it replaces the countdown before the recording starts
@@ -924,6 +925,9 @@ def main():
     args = sys.argv[1:]
     if args and args[0] in ("-h", "--help", "help"):
         print(USAGE)                                  # never start the app just to print help
+        return 0
+    if args and args[0] in ("-V", "--version"):
+        print(f"{CFG.DISPLAY_NAME} {CFG.VERSION}")
         return 0
     if args and args[0] in ("--quit", "quit", "exit") and not _instance_running():
         print("Snipshot is not running.")

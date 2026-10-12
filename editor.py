@@ -18,7 +18,6 @@ import imaging as im  # noqa: E402
 import model as M  # noqa: E402
 import output  # noqa: E402
 
-VERSION = "0.1"
 
 TOOL_KEYS = {"r": "rect", "e": "ellipse", "l": "line", "f": "freehand", "a": "arrow", "t": "text", "s": "speech",
              "i": "step", "h": "highlight", "o": "obfuscate", "c": "crop"}
@@ -392,7 +391,7 @@ class EditorWindow(Gtk.ApplicationWindow):
         A("zoom_fit", self.canvas.zoom_fit, ["<Control>9"])
         A("zoom_actual", lambda: self.canvas.set_zoom(1.0), ["<Control>0"])
         A("preferences", lambda: self.app.show_preferences(self))
-        A("about", lambda: DLG.about_dialog(self, VERSION))
+        A("about", lambda: DLG.about_dialog(self, CFG.VERSION))
         for tool, label in TOOL_LABELS:
             A(f"tool_{tool}", lambda t=tool: self.tool_buttons[t].set_active(True))
 

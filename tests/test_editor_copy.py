@@ -87,6 +87,12 @@ class T(A.SnipshotApp):
             output.copy_text("sentinel2")
             inp.chord(["Control_L", "Shift_L"], "c")
             time.sleep(0.5)
+            # the About dialog opens and carries the version and licence
+            self.on_main(lambda: self.win.activate_action("win.about", None))
+            time.sleep(0.8)
+            dlgs = self.on_main(lambda: [(type(w).__name__, w.get_version(), w.get_license_type().value_nick) for w in Gtk.Window.list_toplevels() if isinstance(w, Gtk.AboutDialog)])
+            import config as CFG
+            check("the About dialog shows the version and the MIT licence", dlgs and dlgs[0][1] == CFG.VERSION and dlgs[0][2] == "mit-x11", str(dlgs))
             import canvas as CV
 
             check("Ctrl+Shift+C copies the selected object into the editor's object clipboard", len(CV._object_clipboard) == 1, str(len(CV._object_clipboard)))

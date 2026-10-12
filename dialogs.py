@@ -223,10 +223,12 @@ def about_dialog(parent, version):
     d = Gtk.AboutDialog(transient_for=parent, modal=False)
     d.set_program_name("Snipshot")
     d.set_version(version)
-    d.set_comments("A screenshot tool and annotation editor for Linux, modelled on Greenshot's workflow.\n"
-                   "Pixelate and blur are regular, adjustable effects.")
-    d.set_license_type(Gtk.License.CUSTOM)
-    d.set_license("Personal project. Behaviour modelled on Greenshot; contains none of its code.")
+    d.set_comments("Screenshots with an annotation editor, screen recording and copy-text (OCR) for GNOME on Wayland.\n"
+                   "Its workflow is modelled on Greenshot; it contains none of Greenshot's code and is not affiliated "
+                   "with that project.")
+    d.set_license_type(Gtk.License.MIT_X11)
+    d.set_copyright("Copyright (c) 2026 01ax")
+    d.set_website("https://github.com/01ax/snipshot")
     d.set_logo_icon_name("snipshot")
     d.present()
 

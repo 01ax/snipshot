@@ -13,6 +13,7 @@ from datetime import datetime
 # SNIPSHOT_CHANNEL=dev runs a side-by-side test copy that shares nothing with the normal install: its own application
 # id (so both can run at once), settings folder, launcher name and icon name.
 CHANNEL = os.environ.get("SNIPSHOT_CHANNEL", "").strip().lower()
+VERSION = "0.2.0"
 APP_NAME = "snipshot" + (f"-{CHANNEL}" if CHANNEL else "")
 APP_ID = "local.snipshot" + (f".{CHANNEL}" if CHANNEL else "")
 DISPLAY_NAME = "Snipshot" + (f" ({CHANNEL})" if CHANNEL else "")
