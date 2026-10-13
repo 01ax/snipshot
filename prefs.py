@@ -222,8 +222,8 @@ class PrefsWindow(Gtk.Window):
         want_out, want_in = self.cfg["record_system_device"], self.cfg["record_mic_device"]
         self.rout.set_selected(self._out_nodes.index(want_out) if want_out in self._out_nodes else 0)
         self.rin.set_selected(self._in_nodes.index(want_in) if want_in in self._in_nodes else 0)
-        hint = Gtk.Label(label="Press R in the capture overlay (Alt+Shift+G), or run: snipshot record. Run it again, or "
-                               "click the red tray icon, to stop. Variables: ${YYYY} ${MM} ${DD} ${hh} ${mm} ${ss}.",
+        hint = Gtk.Label(label="Press R in the capture overlay (Alt+Shift+G), or run: snipshot record. Run it again to stop; "
+                               "the tray icon's menu also has Pause and Delete. Variables: ${YYYY} ${MM} ${DD} ${hh} ${mm} ${ss}.",
                          xalign=0, wrap=True)
         hint.add_css_class("dim-label")
         g.attach(hint, 0, 13, 3, 1)

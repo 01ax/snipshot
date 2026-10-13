@@ -65,7 +65,15 @@ start wireplumber
 start pipewire-pulse
 for i in $(seq 50); do [ -S "$XDG_RUNTIME_DIR/pulse/native" ] && break; sleep 0.1; done
 
-start gnome-shell --headless --wayland --no-x11 --virtual-monitor 1280x720
+# Optional: SNIPSHOT_HL_RES=1920x1080 for another monitor size; SNIPSHOT_HL_EXTENSIONS="dir1 dir2" installs those
+# GNOME Shell extension folders into the private session before the shell starts (they are enabled below).
+mkdir -p "$XDG_DATA_HOME/gnome-shell/extensions"
+EXT_UUIDS=()
+for d in ${SNIPSHOT_HL_EXTENSIONS:-}; do
+    uuid=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]+'/metadata.json'))['uuid'])" "$d")
+    cp -r "$d" "$XDG_DATA_HOME/gnome-shell/extensions/$uuid" && EXT_UUIDS+=("$uuid")
+done
+start gnome-shell --headless --wayland --no-x11 --virtual-monitor "${SNIPSHOT_HL_RES:-1280x720}"
 ok=
 for i in $(seq 100); do
     if gdbus call --session --dest org.gnome.Mutter.ScreenCast --object-path /org/gnome/Mutter/ScreenCast \
@@ -76,6 +84,11 @@ if [ -z "$ok" ]; then
     echo "headless GNOME did not come up; log:" >&2; tail -20 "$ROOT/gnome-shell.log" >&2; exit 97
 fi
 
+for uuid in "${EXT_UUIDS[@]:-}"; do
+    [ -n "$uuid" ] && gdbus call --session --dest org.gnome.Shell.Extensions --object-path /org/gnome/Shell/Extensions \
+        --method org.gnome.Shell.Extensions.EnableExtension "$uuid" >/dev/null 2>&1
+done
+sleep 1
 start python3 -I "$(dirname "$(readlink -f "$0")")/fake_watcher.py"        # a tray host, like the AppIndicator extension
 # GTK programs started by the command draw on the private compositor (software rendering, nothing reaches a real screen)
 export WAYLAND_DISPLAY=$(ls "$XDG_RUNTIME_DIR" | grep -E '^wayland-[0-9]+$' | head -1) GDK_BACKEND=wayland GSK_RENDERER=cairo

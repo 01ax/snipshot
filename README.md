@@ -11,6 +11,35 @@ with it.
 > distributions are untested; please open an issue if something misbehaves. X11 sessions and other desktops are not
 > supported.
 
+## Screenshots
+
+(Made on a private, virtual GNOME desktop with made-up demo content; see `tools/make_screenshots.py`.)
+
+**One overlay for everything.** Alt+Shift+G, drag a region; the bar at the top switches between **Screenshot**,
+**Record** and **Text** (copy the text in an area).
+
+<img src="docs/screenshots/capture-overlay.png" width="720" alt="The capture overlay in screenshot mode">
+
+**Then choose what to do with it**, or press Esc to throw it away, and edit it if you like.
+
+<img src="docs/screenshots/after-capture.png" height="420" alt="The after-capture menu"> <img src="docs/screenshots/editor.png" height="420" alt="The editor with a pixelated key, a rectangle, an arrow and a note">
+
+**Recording.** Pick an area (or a window, or a whole screen), switch system sound and the microphone on or off, press Start.
+While it records, pause / stop / delete sit next to GNOME's orange screen-sharing button (optional extension, see
+[`shell-extension/`](shell-extension/)).
+
+<img src="docs/screenshots/record-overlay.png" width="720" alt="The capture overlay in record mode with an area chosen">
+
+<img src="docs/screenshots/recording-controls.png" width="540" alt="Recording controls in the top bar: time, pause, stop and delete buttons, with a tooltip, and the paused state">
+
+**Copy text from the screen.** Drag over text; what was read is shown (and copied to the clipboard) so you can correct it.
+
+<img src="docs/screenshots/text-overlay.png" width="470" alt="The overlay in text mode"> <img src="docs/screenshots/text-result.png" width="470" alt="The recognised text window">
+
+**Preferences** has a tab for each part (this is the Recording tab).
+
+<img src="docs/screenshots/preferences.png" width="360" alt="Preferences, Recording tab">
+
 ## What it does
 
 **Screenshots**
@@ -126,6 +155,9 @@ tests/run_all.sh          # everything (several minutes)
 tests/run_all.sh quick    # without the recording tests
 tools/headless_session.sh python3 -I tests/test_overlay_modes.py   # one test
 ```
+
+`SNIPSHOT_HL_RES=1920x1080 SNIPSHOT_HL_EXTENSIONS="$PWD/shell-extension" tools/headless_session.sh python3 -I
+tools/make_screenshots.py docs/screenshots` regenerates the pictures above (the uncropped grabs go to a `raw/` folder that git ignores).
 
 `SNIPSHOT_CHANNEL=dev` (or `python3 install.py --dev`) runs a side-by-side copy with its own settings and application
 id, which is handy for trying changes without touching your normal install.
