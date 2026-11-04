@@ -62,6 +62,9 @@ class Canvas(Gtk.ScrolledWindow):
         self.modified = False
         self._gesture = None
         self._cache = (None, None)
+        self._mips = {}                         # see _halved()
+        self._scale_seen = 1.0                  # device scale the zoom was last set for
+        self._scale_surface = None
         self._has_alpha = False
         self._alpha_for = None
         self._edit = None                       # active in-place text edit
@@ -112,6 +115,7 @@ class Canvas(Gtk.ScrolledWindow):
         self._text_css = provider
         Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), provider,
                                                   Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1)
+        self.connect("map", self._on_map)
         self.connect("notify::width", lambda *_: self._maybe_refit())
         self.connect("notify::height", lambda *_: self._maybe_refit())
         self._update_size()
@@ -130,10 +134,28 @@ class Canvas(Gtk.ScrolledWindow):
         pw, ph = self._page()
         return max(int(iw * self.zoom) + 2 * MARGIN, pw), max(int(ih * self.zoom) + 2 * MARGIN, ph)
 
+    def _area_offset(self):
+        """Where the drawing area is inside its window, in logical pixels (scrolling included)."""
+        try:
+            native = self.get_native()
+            point = Graphene.Point()
+            point.init(0, 0)
+            found, p = self.area.compute_point(native, point)
+            tx, ty = native.get_surface_transform()
+            return (p.x + tx, p.y + ty) if found else (0.0, 0.0)
+        except (AttributeError, TypeError):
+            return 0.0, 0.0
+
     def _origin(self):
+        """Where the picture's corner is in the drawing area. Snapped so that it lands on a whole SCREEN pixel: at a
+        fractional position every picture pixel is blended with its neighbours, which made 100% look soft (the area
+        itself can sit on a half pixel, e.g. 37 logical px = 55.5 screen px at scale 1.5, so its offset counts)."""
         iw, ih = self.scene.size
         aw, ah = self._area_size()
-        return max(MARGIN, (aw - iw * self.zoom) / 2), max(MARGIN, (ah - ih * self.zoom) / 2)
+        s = self._device_scale()
+        gx, gy = self._area_offset()
+        ox, oy = max(MARGIN, (aw - iw * self.zoom) / 2), max(MARGIN, (ah - ih * self.zoom) / 2)
+        return round((gx + ox) * s) / s - gx, round((gy + oy) * s) / s - gy
 
     def to_img(self, wx, wy):
         ox, oy = self._origin()
@@ -149,28 +171,67 @@ class Canvas(Gtk.ScrolledWindow):
         self.area.set_content_height(int(ih * self.zoom) + 2 * MARGIN)
         self.area.queue_draw()
 
+    # ``zoom`` is logical pixels per picture pixel, which is what all the geometry uses. But "100%" for the user means
+    # one picture pixel per SCREEN pixel: on a monitor scaled to 1.5 that is a logical zoom of 1/1.5. Showing the
+    # picture at a logical 1.0 there magnified it by 1.5 and looked like a low-resolution copy.
+    def _unit(self):
+        """The logical zoom that shows one picture pixel on one screen pixel."""
+        return 1.0 / self._device_scale()
+
+    def view_zoom(self):
+        """The zoom as shown to the user: 1.0 = 100% = actual pixels."""
+        return self.zoom * self._device_scale()
+
     def set_zoom(self, z, fit=False):
         self.fit = fit
         self.zoom = max(ZOOM_MIN, min(ZOOM_MAX, z))
         self._update_size()
-        self.on_zoom(self.zoom)
+        self.on_zoom(self.view_zoom())
+
+    def set_view_zoom(self, v):
+        self.set_zoom(v * self._unit())
+
+    def zoom_actual(self):
+        self.set_view_zoom(1.0)
 
     def zoom_fit(self):
         iw, ih = self.scene.size
         vw, vh = max(50, self.get_width() - 2 * MARGIN), max(50, self.get_height() - 2 * MARGIN)
-        self.set_zoom(min(1.0, vw / iw, vh / ih) if self.get_width() > 1 else 1.0, fit=True)
+        self.set_zoom(min(self._unit(), vw / iw, vh / ih) if self.get_width() > 1 else self._unit(), fit=True)
 
     def _maybe_refit(self):
         if self.fit:
             self.zoom_fit()
 
     def zoom_in(self):
-        nxt = next((s for s in ZOOM_STEPS if s > self.zoom + 1e-6), ZOOM_MAX)
-        self.set_zoom(nxt)
+        u = self._unit()
+        self.set_zoom(next((s * u for s in ZOOM_STEPS if s * u > self.zoom + 1e-6), ZOOM_MAX))
 
     def zoom_out(self):
-        prv = next((s for s in reversed(ZOOM_STEPS) if s < self.zoom - 1e-6), ZOOM_MIN)
-        self.set_zoom(prv)
+        u = self._unit()
+        self.set_zoom(next((s * u for s in reversed(ZOOM_STEPS) if s * u < self.zoom - 1e-6), ZOOM_MIN))
+
+    def _scale_changed(self, *_):
+        """The window moved to a monitor with another scale (or its scale became known): keep what the user chose,
+        best fit stays best fit and a fixed zoom keeps showing the same percentage of actual pixels."""
+        now = self._device_scale()
+        before, self._scale_seen = self._scale_seen, now
+        if now == before:
+            return
+        if self.fit:
+            self.zoom_fit()
+        else:
+            self.set_zoom(self.zoom * before / now)
+
+    def _on_map(self, *_):
+        try:
+            surface = self.get_native().get_surface()
+        except AttributeError:
+            return
+        if surface is not self._scale_surface:
+            self._scale_surface = surface
+            surface.connect("notify::scale", self._scale_changed)
+        self._scale_changed()
 
     def _scroll(self, ctrl, dx, dy):
         if ctrl.get_current_event_state() & Gdk.ModifierType.CONTROL_MASK:
@@ -276,6 +337,134 @@ class Canvas(Gtk.ScrolledWindow):
         self._finish_text_edit()
         return im.from_surface(R.render_scene(self.scene))
 
+    # While a drag changes objects, everything below the lowest changing one cannot change, so it is rendered once
+    # per drag ("under") and each frame only draws the objects from there up. Without this every mouse move
+    # re-rendered the whole picture, shadows and all, which made drawing laggy once a few annotations existed.
+    def _live(self):
+        """(first, under, memo) while a drag is changing objects: ``under`` is the picture below scene index ``first``,
+        kept for the whole drag, and ``memo`` a dict for work that depends only on it. None when no drag is changing
+        objects."""
+        g = self._gesture
+        if not g or g["kind"] not in ("create", "move", "resize") or self._edit:
+            return None
+        objs = [g["obj"]] if "obj" in g else self.selection
+        mine = self.scene.objects
+        idx = [i for i, o in enumerate(mine) if any(o is x for x in objs)]
+        if not idx or len(idx) != len(objs):                  # e.g. undo during the drag replaced the objects
+            return None
+        first = min(idx)
+        if "under" not in g or g["under"][0] != first or g["under"][2] is not self.scene.base:
+            g["under"] = (first, R.render_objects(self.scene, im.to_surface(self.scene.base), 0, first),
+                          self.scene.base, {})                  # {}: work that only depends on ``under`` (apply_filter)
+        return first, g["under"][1], g["under"][3]
+
+    def _live_clip(self, first):
+        """Picture-space (x0, y0, x1, y1) that the objects from ``first`` up can change, or None for 'anywhere'."""
+        x0 = y0 = math.inf
+        x1 = y1 = -math.inf
+        for o in self.scene.objects[first:]:
+            if o.kind == "highlight" and o.p.get("preset") in ("area", "gray"):
+                return None                                   # these dim or grey the whole picture
+            bx0, by0, bx1, by1 = R.object_bbox(o)
+            x0, y0, x1, y1 = min(x0, bx0), min(y0, by0), max(x1, bx1), max(y1, by1)
+        return (x0, y0, x1, y1) if x0 < x1 else None
+
+    # Showing the picture smaller than it is. Cairo's GOOD filter does that with a general convolution that takes
+    # 20-40 ms for a 4K picture (except at exactly 50%), on every redraw. So the picture is first halved exactly (a
+    # 2x2 box filter, 1-3 ms) until what is left is a mild 50-100% scale, which the cheap bilinear filter does well.
+    # The halved copy is kept, so redraws that do not change the picture (hover, selection, crop) cost almost nothing.
+    def _device_scale(self):
+        """Device pixels per logical pixel of the window the canvas is in (1.5 on the 4K monitor)."""
+        try:
+            surface = self.get_native().get_surface()
+            return float(surface.get_scale())
+        except (AttributeError, TypeError):
+            return 1.0
+
+    def _level(self):
+        """How many times the picture is halved before it is drawn at the current zoom."""
+        z, k = self.zoom * self._device_scale(), 0
+        while z < 0.5 and k < 8:
+            z, k = z * 2, k + 1
+        return k
+
+    def _halved(self, surf, k, keep, region=None):
+        """``surf`` halved ``k`` times. ``keep`` caches the result (for pictures that stay the same for several
+        frames); ``region`` = (x0, y0, x1, y1) picture pixels limits the work to the part that will be shown."""
+        if k == 0:
+            return surf
+        hit = self._mips.get(id(surf)) if keep else None
+        if hit is not None and hit[0] is surf and hit[1] == k:
+            return hit[2]
+        cur, reg = surf, region
+        for _ in range(k):
+            out = cairo.ImageSurface(cairo.FORMAT_ARGB32, (cur.get_width() + 1) // 2, (cur.get_height() + 1) // 2)
+            cr = cairo.Context(out)
+            if reg is not None:
+                reg = (math.floor(reg[0] / 2) - 1, math.floor(reg[1] / 2) - 1, math.ceil(reg[2] / 2) + 1, math.ceil(reg[3] / 2) + 1)
+                cr.rectangle(reg[0], reg[1], reg[2] - reg[0], reg[3] - reg[1])
+                cr.clip()
+            cr.scale(0.5, 0.5)
+            cr.set_source_surface(cur, 0, 0)
+            pattern = cr.get_source()
+            pattern.set_filter(cairo.FILTER_BILINEAR)           # exactly half: each result pixel is a 2x2 average
+            pattern.set_extend(cairo.EXTEND_PAD)
+            cr.paint()
+            out.flush()
+            cur = out
+        if keep:
+            self._mips[id(surf)] = (surf, k, cur)               # holding ``surf`` keeps its id from being reused
+            while len(self._mips) > 2:
+                del self._mips[next(iter(self._mips))]
+        return cur
+
+    def _paint_surface(self, cr, surf, ox, oy, keep=True, region=None):
+        """Paint a picture-sized surface at the current zoom. Whatever clip is set on ``cr`` still applies."""
+        z, k = self.zoom, self._level()
+        src = self._halved(surf, k, keep, region)
+        n = 2 ** k
+        cr.save()
+        d = self._device_scale()
+
+        def edge(v):                                            # an edge a hair off a screen pixel (rounding error) is snapped
+            return round(v * d) / d if abs(v * d - round(v * d)) < 1e-3 else v
+        cr.rectangle(ox, oy, edge(ox + surf.get_width() * z) - ox, edge(oy + surf.get_height() * z) - oy)   # the picture's edges
+        cr.clip()
+        cr.translate(ox, oy)
+        cr.scale(z * n, z * n)
+        cr.set_source_surface(src, 0, 0)
+        pattern = cr.get_source()
+        pattern.set_extend(cairo.EXTEND_PAD)
+        dz = z * self._device_scale()                           # screen pixels per picture pixel
+        pattern.set_filter(cairo.FILTER_NEAREST if dz >= 2 else cairo.FILTER_BILINEAR if (k or dz < 1)
+                           else cairo.FILTER_GOOD)
+        cr.paint()
+        cr.restore()
+
+    def _paint_picture(self, cr, ox, oy):
+        live = self._live()
+        if live is None:
+            self._paint_surface(cr, self.rendered(), ox, oy)
+            return
+        first, under, memo = live
+        acc = R.render_objects(self.scene, R.copy_surface(under), first, memo=memo)
+        clip = self._live_clip(first)
+        if clip is None or self._alpha_check():                 # (rare) the change can be anywhere: draw it all
+            self._paint_surface(cr, acc, ox, oy, keep=False)
+            return
+        # the unchanged picture comes from the cache, and only the part the drag touches is drawn from the new one
+        self._paint_surface(cr, under, ox, oy)
+        z = self.zoom
+        x0, y0 = math.floor(ox + clip[0] * z) - 2, math.floor(oy + clip[1] * z) - 2
+        x1, y1 = math.ceil(ox + clip[2] * z) + 2, math.ceil(oy + clip[3] * z) + 2
+        m = 2 ** self._level() + 2                              # picture px: the filter reads a little beyond the clip
+        cr.save()
+        cr.rectangle(x0, y0, x1 - x0, y1 - y0)
+        cr.clip()
+        self._paint_surface(cr, acc, ox, oy, keep=False,
+                            region=((x0 - ox) / z - m, (y0 - oy) / z - m, (x1 - ox) / z + m, (y1 - oy) / z + m))
+        cr.restore()
+
     def _alpha_check(self):
         if self._alpha_for is not self.scene.base:
             self._has_alpha = bool((self.scene.base[..., 3] < 255).any())
@@ -287,21 +476,20 @@ class Canvas(Gtk.ScrolledWindow):
         cr.paint()
         iw, ih = self.scene.size
         ox, oy = self._origin()
-        cr.save()
-        cr.translate(ox, oy)
-        cr.scale(self.zoom, self.zoom)
-        if self._alpha_check():
-            self._checker(cr, iw, ih)
-        surf = self.rendered()
-        cr.set_source_surface(surf, 0, 0)
-        cr.get_source().set_filter(cairo.FILTER_NEAREST if self.zoom >= 2 else cairo.FILTER_GOOD)
-        cr.paint()
-        cr.restore()
-        # image frame
+        # image frame: one screen pixel wide, just outside the picture (drawn first, so the picture covers any
+        # sliver of anti-aliasing that rounding leaves on its edge pixels)
+        px = 1.0 / self._device_scale()
         cr.set_source_rgba(0, 0, 0, 0.5)
-        cr.set_line_width(1)
-        cr.rectangle(ox - 0.5, oy - 0.5, iw * self.zoom + 1, ih * self.zoom + 1)
+        cr.set_line_width(px)
+        cr.rectangle(ox - px / 2, oy - px / 2, iw * self.zoom + px, ih * self.zoom + px)
         cr.stroke()
+        if self._alpha_check():
+            cr.save()
+            cr.translate(ox, oy)
+            cr.scale(self.zoom, self.zoom)
+            self._checker(cr, iw, ih)
+            cr.restore()
+        self._paint_picture(cr, ox, oy)
         self._draw_crop(cr)
         for o in self.selection:
             self._draw_selection(cr, o)
@@ -567,8 +755,11 @@ class Canvas(Gtk.ScrolledWindow):
         o = M.new_obj(kind, ix, iy)
         o.p.update(copy.deepcopy(self.defaults[kind]))
         snap = self.scene.snapshot()
+        fresh = self._cache[1] if self._cache[0] == (self.scene.version, ()) else None   # the picture as it is now
         self.scene.add(o)
         self._gesture = dict(kind="create", obj=o, start=(ix, iy), snap=snap, dirty=True)
+        if fresh is not None:                      # the new object goes on top, so what is already shown is "under"
+            self._gesture["under"] = (len(self.scene.objects) - 1, fresh, self.scene.base, {})
         if kind == "step":
             side = M.DEFAULT_SIZE["step"][0]
             o.set_rect(ix - side / 2, iy - side / 2, side, side)

@@ -21,6 +21,7 @@ from model import (ARROW_BOTH, ARROW_END, ARROW_START, LINE_LIKE)  # noqa: E402
 SHADOW_OFFSET = 3
 SHADOW_ALPHA = 0.45
 SHADOW_BLUR = 2
+_SHADOW_LUT = np.clip(np.arange(256, dtype=np.float32) * SHADOW_ALPHA, 0, 255).astype(np.uint8)   # blurred alpha -> shadow alpha
 
 
 # --------------------------------------------------------------------------- helpers
@@ -381,30 +382,36 @@ def object_bbox(o):
 
 
 def draw_shadow(cr, o, scene=None):
-    """Soft drop shadow: draw the object offscreen, blur its alpha, tint it dark, paint offset."""
+    """Soft drop shadow: draw the object's alpha offscreen, blur it, paint it dark and offset. Only alpha matters, so it
+    is one channel throughout, and the blur only works where the alpha is not flat (an outline rectangle covering the
+    screen costs its four edges, not its area)."""
     bx0, by0, bx1, by1 = object_bbox(o)
     x0, y0 = int(math.floor(bx0)), int(math.floor(by0))
     w, h = int(math.ceil(bx1)) - x0 + 1, int(math.ceil(by1)) - y0 + 1
     if w <= 0 or h <= 0 or w * h > 40_000_000:
         return
-    tmp = cairo.ImageSurface(cairo.FORMAT_ARGB32, w, h)
+    tmp = cairo.ImageSurface(cairo.FORMAT_A8, w, h)
     tcr = cairo.Context(tmp)
     tcr.translate(-x0, -y0)
     draw_body(tcr, o, scene)
-    arr = im.from_surface(tmp)
-    alpha = np.zeros_like(arr)
-    alpha[..., 3] = arr[..., 3]
-    soft = fx.blur(alpha, SHADOW_BLUR)
-    sh = np.zeros_like(soft)
-    sh[..., 3] = np.clip(soft[..., 3].astype(np.float32) * SHADOW_ALPHA, 0, 255).astype(np.uint8)
-    cr.set_source_surface(im.to_surface(sh), x0 + SHADOW_OFFSET, y0 + SHADOW_OFFSET)
-    cr.paint()
+    tmp.flush()
+    alpha = np.ndarray((h, tmp.get_stride()), dtype=np.uint8, buffer=tmp.get_data())[:, :w]
+    soft = fx.blur_sparse(alpha, SHADOW_BLUR, lut=_SHADOW_LUT)
+    mask = cairo.ImageSurface(cairo.FORMAT_A8, w, h)
+    np.ndarray((h, mask.get_stride()), dtype=np.uint8, buffer=mask.get_data())[:, :w] = soft
+    mask.mark_dirty()
+    cr.set_source_rgba(0, 0, 0, 1)
+    cr.mask_surface(mask, x0 + SHADOW_OFFSET, y0 + SHADOW_OFFSET)
 
 
 # --------------------------------------------------------------------------- filters (obfuscate / highlight)
 
-def apply_filter(acc, o):
-    """Transform the pixels already drawn in ``acc`` under a filter object (obfuscate or highlight)."""
+def apply_filter(acc, o, memo=None):
+    """Transform the pixels already drawn in ``acc`` under a filter object (obfuscate or highlight).
+
+    ``memo`` (a dict) is for callers that draw the same picture again and again with only this filter's rectangle
+    changing, like the editor while you drag it: the dimmed / greyed picture does not depend on the rectangle, so it is
+    worked out once and kept there. Pass it only when ``acc`` is the same picture each time."""
     w, h = acc.get_width(), acc.get_height()
     r = int_rect(o, w, h)
     if r is None:
@@ -416,7 +423,13 @@ def apply_filter(acc, o):
             m = fx.blur_margin(rad)
             px0, py0 = max(0, x - m), max(0, y - m)
             px1, py1 = min(w, x + rw + m), min(h, y + rh + m)
-            padded = fx.blur(im.from_surface(acc, px0, py0, px1 - px0, py1 - py0), rad)
+            src = im.from_surface(acc, px0, py0, px1 - px0, py1 - py0)
+            if (src[..., 3] == 255).all():                  # opaque (a screenshot): alpha stays 255, so blur only B, G, R
+                padded = np.empty_like(src)
+                padded[..., :3] = fx.blur(src[..., :3], rad)
+                padded[..., 3] = 255
+            else:
+                padded = fx.blur(src, rad)
             out = padded[y - py0:y - py0 + rh, x - px0:x - px0 + rw]
         else:
             region = im.from_surface(acc, x, y, rw, rh)
@@ -431,15 +444,20 @@ def apply_filter(acc, o):
         cr.rectangle(x, y, rw, rh)
         cr.fill()
     elif preset in ("area", "gray"):
-        full = im.from_surface(acc)
-        if preset == "area":
-            b = float(o.p.get("brightness", 0.5))
-            out = full.copy()
-            out[..., :3] = np.clip(full[..., :3].astype(np.float32) * b, 0, 255).astype(np.uint8)
-        else:
-            out = im.grayscale(full)
-        out[y:y + rh, x:x + rw] = full[y:y + rh, x:x + rw]
+        key = (preset, float(o.p.get("brightness", 0.5)))
+        out = memo.get(key) if memo is not None else None
+        keep = im.from_surface(acc, x, y, rw, rh)                       # the part that stays as it was
+        if out is None:
+            full = im.from_surface(acc)
+            if preset == "area":
+                out = full.copy()
+                out[..., :3] = np.clip(full[..., :3].astype(np.float32) * key[1], 0, 255).astype(np.uint8)
+            else:
+                out = im.grayscale(full)
+            if memo is not None:
+                memo[key] = out
         write_region(acc, 0, 0, out)
+        write_region(acc, x, y, keep)
     elif preset == "magnify":
         f = max(1.0, float(o.p.get("magnification", 2)))
         cw, ch = rw / f, rh / f
@@ -458,24 +476,42 @@ def apply_filter(acc, o):
 
 # --------------------------------------------------------------------------- whole scene
 
-def draw_object(cr, acc, o, scene):
+def draw_object(cr, acc, o, scene, memo=None):
     if o.kind == "crop":
         return
     if o.kind in ("obfuscate", "highlight"):
-        apply_filter(acc, o)
+        apply_filter(acc, o, memo)
         return
     if o.shadow and o.kind not in ("freehand",):
         draw_shadow(cr, o, scene)
     draw_body(cr, o, scene)
 
 
-def render_scene(scene, hide=()):
-    """The finished image (what gets saved / copied): base plus all objects. ``hide`` skips objects by uid."""
-    acc = im.to_surface(scene.base)
+def render_objects(scene, acc, start=0, stop=None, hide=(), memo=None):
+    """Draw ``scene.objects[start:stop]`` onto the surface ``acc`` (in place) and return it. ``hide`` skips objects
+    by uid. Drawing only the top of the stack onto a saved render of the bottom is how the editor stays quick while
+    you drag an object. ``memo`` is handed to the first object drawn only, the one that sees ``acc`` exactly as it
+    came (see apply_filter)."""
     cr = cairo.Context(acc)
-    for o in scene.objects:
+    for o in scene.objects[start:stop]:
         if o.uid in hide:
             continue
-        draw_object(cr, acc, o, scene)
+        draw_object(cr, acc, o, scene, memo)
+        memo = None
         acc.flush()
     return acc
+
+
+def copy_surface(surf):
+    out = cairo.ImageSurface(cairo.FORMAT_ARGB32, surf.get_width(), surf.get_height())
+    cr = cairo.Context(out)
+    cr.set_operator(cairo.OPERATOR_SOURCE)
+    cr.set_source_surface(surf, 0, 0)
+    cr.paint()
+    out.flush()
+    return out
+
+
+def render_scene(scene, hide=()):
+    """The finished image (what gets saved / copied): base plus all objects. ``hide`` skips objects by uid."""
+    return render_objects(scene, im.to_surface(scene.base), hide=hide)

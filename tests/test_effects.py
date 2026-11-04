@@ -80,6 +80,79 @@ edge = fx.blur_region(base, -10, -10, 50, 50, 8)
 check("blur_region clips to the image", edge.shape == (40, 40, 4))
 check("blur_region fully outside => empty", fx.blur_region(base, 500, 500, 10, 10, 5).size == 0)
 
+# ---- the original float64 blur, kept here as the reference that fx.blur / fx.blur_sparse must equal exactly
+def ref_blur(img, radius):
+    def axis_blur(a, r, axis):
+        pad = [(0, 0)] * a.ndim
+        pad[axis] = (r, r)
+        p = np.pad(a, pad, mode="edge")
+        c = np.cumsum(p, axis=axis, dtype=np.float64)
+        zs = list(c.shape); zs[axis] = 1
+        c = np.concatenate([np.zeros(zs), c], axis=axis)
+        n = a.shape[axis]
+        return (np.take(c, np.arange(2 * r + 1, 2 * r + 1 + n), axis=axis) - np.take(c, np.arange(0, n), axis=axis)) / (2 * r + 1)
+    a = img.astype(np.float64)
+    for _ in range(2):
+        a = axis_blur(a, radius, 1)
+        a = axis_blur(a, radius, 0)
+    return np.clip(np.rint(a), 0, 255).astype(np.uint8)
+
+
+ok = bad = 0
+for shape in ((1, 1, 4), (5, 9, 4), (31, 17, 4), (64, 80, 3), (101, 157, 4)):
+    img = rng.integers(0, 256, shape, dtype=np.uint8)
+    for r in (1, 2, 3, 4, 5, 8, 20, 60):                    # 60 is larger than most of these images; 20+ uses 64-bit or sums
+        if np.array_equal(fx.blur(img, r), ref_blur(img, r)):
+            ok += 1
+        else:
+            bad += 1
+check(f"blur (integer arithmetic) equals the original float blur ({ok} images and radii)", bad == 0, f"({bad} differ)")
+flatish = np.full((40, 60, 4), 200, np.uint8); flatish[10:20, 10:30] = 40
+check("blur of a flat area with a hole equals the original", np.array_equal(fx.blur(flatish, 7), ref_blur(flatish, 7)))
+
+# ---- blur_sparse: the shadow's blur, which must equal the plain blur exactly (only faster on mostly-flat input)
+import cairo
+
+
+def _alpha_shape(kind, w, h):
+    surf = cairo.ImageSurface(cairo.FORMAT_A8, w, h)
+    cr = cairo.Context(surf)
+    cr.set_line_width(2.5)
+    if kind == "outline":
+        cr.rectangle(14.3, 14.7, w - 29, h - 30); cr.stroke()
+    elif kind == "filled":
+        cr.rectangle(14, 14, w - 28, h - 28); cr.fill()
+    elif kind == "ellipse":
+        cr.translate(w / 2, h / 2); cr.scale((w - 30) / 2, (h - 30) / 2); cr.arc(0, 0, 1, 0, 6.2832); cr.fill()
+    elif kind == "line":
+        cr.move_to(15, 15); cr.line_to(w - 15, h - 18); cr.stroke()
+    elif kind == "specks":
+        a = np.zeros((h, w), np.uint8)
+        a[14:h - 14, 14:w - 14] = (rng.random((h - 28, w - 28)) < 0.02) * rng.integers(1, 256, (h - 28, w - 28))
+        return a
+    surf.flush()
+    return np.ndarray((h, surf.get_stride()), np.uint8, buffer=surf.get_data())[:, :w].copy()
+
+
+same = bad = 0
+for kind in ("outline", "filled", "ellipse", "line", "specks"):
+    for (w, h) in ((60, 40), (131, 77), (400, 250), (700, 500)):
+        for r in (1, 2, 3, 5, 10, 40):                     # 40 needs 64-bit sums
+            a = _alpha_shape(kind, w, h)
+            if np.array_equal(ref_blur(a[..., None], r)[..., 0], fx.blur_sparse(a, r)):
+                same += 1
+            else:
+                bad += 1
+check(f"blur_sparse equals the original float blur ({same} shapes, sizes and radii)", bad == 0, f"({bad} differ)")
+lut = np.clip(np.arange(256, dtype=np.float32) * 0.45, 0, 255).astype(np.uint8)
+a = _alpha_shape("outline", 300, 200)
+check("blur_sparse with a lookup table equals blur then lookup", np.array_equal(fx.blur_sparse(a, 2, lut=lut), lut[ref_blur(a[..., None], 2)[..., 0]]))
+check("blur_sparse of an empty plane is empty", not fx.blur_sparse(np.zeros((90, 90), np.uint8), 2).any())
+check("blur_sparse radius 0 is a copy", np.array_equal(fx.blur_sparse(a, 0), a))
+huge = _alpha_shape("outline", 3000, 1800)
+t = time.perf_counter(); fx.blur_sparse(huge, 2); ts = (time.perf_counter() - t) * 1000
+check(f"blur_sparse of a screen-sized outline is quick ({ts:.0f} ms; the plain blur needs ~200)", ts < 60)
+
 # ---- speed (must stay interactive while a rectangle is being dragged)
 big = rng.integers(0, 256, (800, 1200, 4), dtype=np.uint8)
 t = time.perf_counter(); fx.pixelate(big, 12); tp = (time.perf_counter() - t) * 1000

@@ -389,7 +389,7 @@ class EditorWindow(Gtk.ApplicationWindow):
         A("zoom_in", self.canvas.zoom_in, ["<Control>plus", "<Control>equal", "<Control>KP_Add"])
         A("zoom_out", self.canvas.zoom_out, ["<Control>minus", "<Control>KP_Subtract"])
         A("zoom_fit", self.canvas.zoom_fit, ["<Control>9"])
-        A("zoom_actual", lambda: self.canvas.set_zoom(1.0), ["<Control>0"])
+        A("zoom_actual", self.canvas.zoom_actual, ["<Control>0"])
         A("preferences", lambda: self.app.show_preferences(self))
         A("about", lambda: DLG.about_dialog(self, CFG.VERSION))
         for tool, label in TOOL_LABELS:
@@ -601,7 +601,7 @@ class EditorWindow(Gtk.ApplicationWindow):
         if i == 0:
             self.canvas.zoom_fit()
         else:
-            self.canvas.set_zoom(int(ZOOM_ITEMS[i].rstrip("%")) / 100)
+            self.canvas.set_view_zoom(int(ZOOM_ITEMS[i].rstrip("%")) / 100)
 
     def _wheel(self, ctrl, dx, dy):
         if ctrl.get_current_event_state() & Gdk.ModifierType.CONTROL_MASK and self.canvas.pointer_over():
