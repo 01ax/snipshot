@@ -39,6 +39,9 @@ FORMATS = {
 QUALITY = {"high": dict(x264=20, vp8=8), "medium": dict(x264=25, vp8=18), "low": dict(x264=30, vp8=32)}
 SYSTEM_AUDIO = "@DEFAULT_MONITOR@"       # what you hear: the monitor of the default output
 MIN_FREE_BYTES = 300 * 1024 * 1024
+# BGRx -> I420 on one thread manages about 150 fps at 2560x1440 but only ~30 fps at 3840x2160 (measured here); a few threads
+# bring 4K to well over 60
+CONVERT_THREADS = 6
 
 
 def ensure_gst():
@@ -180,8 +183,10 @@ def _video_source(video, fps):
     else:
         opts = f"fd={video['fd']} " if video.get("fd") is not None else ""
         # keepalive re-sends the last frame when the screen is static, so the video has no gaps
+        # the queue lets the copy out of the compositor's buffer and the colour conversion run on separate threads:
+        # one thread doing both tops out near 60 fps at 4K
         src = (f"pipewiresrc name=vsrc {opts}path={video['node']} always-copy=true do-timestamp=true "
-               f"keepalive-time={max(1, int(1000 / fps))}")
+               f"keepalive-time={max(1, int(1000 / fps))} ! queue name=sq max-size-buffers=6 max-size-bytes=0 max-size-time=0")
     if video.get("window"):
         # the stream is read by Python (to cut the window out of the canvas) and handed to an appsrc
         fw, fh = output_size(video["size"], None, video["fit"])
@@ -244,7 +249,7 @@ def build_pipeline(video, audio, out_path, fmt="mp4", fps=30, quality="medium"):
     mux = ('mp4mux name=mux fragment-duration=2000 fragment-mode=first-moov-then-finalise' if fmt == "mp4" else
            'webmmux name=mux') + f' ! filesink location="{out_path}" buffer-mode=unbuffered async=false'
     head, extra = _video_source(video, fps)
-    vchain = (f"{head} ! videoconvert ! video/x-raw,format=I420 ! videorate ! "
+    vchain = (f"{head} ! videoconvert n-threads={CONVERT_THREADS} ! video/x-raw,format=I420 ! videorate ! "
               f"video/x-raw,framerate={fps}/1 ! queue name=vq max-size-time=3000000000 max-size-buffers=0 "
               f"max-size-bytes=0 ! {_video_encoder(fmt, quality, fps, out_h)} ! queue name=vout ! mux.")
     parts = [mux, vchain] + extra

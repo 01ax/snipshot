@@ -13,7 +13,7 @@ from datetime import datetime
 # SNIPSHOT_CHANNEL=dev runs a side-by-side test copy that shares nothing with the normal install: its own application
 # id (so both can run at once), settings folder, launcher name and icon name.
 CHANNEL = os.environ.get("SNIPSHOT_CHANNEL", "").strip().lower()
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 APP_NAME = "snipshot" + (f"-{CHANNEL}" if CHANNEL else "")
 APP_ID = "local.snipshot" + (f".{CHANNEL}" if CHANNEL else "")
 DISPLAY_NAME = "Snipshot" + (f" ({CHANNEL})" if CHANNEL else "")
@@ -46,6 +46,8 @@ DEFAULTS = {
     "record_mic": False,
     "record_cursor": True,
     "record_keep_awake": True,          # no idle screen-off / auto-lock while a recording runs
+    "record_start_command": "",         # run before each recording starts / after it ends (e.g. to pause desktop effects that
+    "record_stop_command": "",          # starve the screen capture); not edited in Preferences, set in config.json
     "record_system_device": "",         # "" = the default output; otherwise a sink's node name
     "record_mic_device": "",            # "" = the default microphone; otherwise a source's node name
     "last_recording": "",

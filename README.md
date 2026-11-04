@@ -134,6 +134,11 @@ every other option are in Preferences. Settings live in `~/.config/snipshot/conf
 - GNOME's window picker (for "record one window") is the desktop's own dialog.
 - Recording a 4K screen at 30 fps uses roughly one and a half CPU cores; lower the frame rate or quality in
   Preferences on a slower machine.
+- **Recording looks like a slideshow?** The screen capture is delivered by GNOME Shell, so if the compositor is
+  already busy (heavy blur or animation extensions, a very large multi-monitor desktop) it cannot hand over 60 frames
+  a second, whatever the file says. Set `record_start_command` and `record_stop_command` in `config.json` to a
+  command that switches those effects off before a recording starts and back on when it ends. The start command is
+  waited for (up to 8 seconds); the stop command runs after the recording ends for any reason.
 - Not implemented (yet): Greenshot's cut marks, emoji and icon objects, and online destinations such as Imgur or Office.
 
 ## How it works

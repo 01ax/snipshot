@@ -3,7 +3,9 @@
 The GUI (app.py) only deals with this class: ``RecordingJob(...).start()`` and ``.stop()``, plus three callbacks.
 """
 import os
+import shlex
 import shutil
+import subprocess
 
 from gi.repository import GLib
 
@@ -13,6 +15,8 @@ import portal_cast
 import recorder as R
 
 LOW_DISK_BYTES = 100 * 1024 * 1024
+HOOK_TIMEOUT_S = 8        # the start command is waited for, so it must be quick
+HOOK_SETTLE_MS = 800      # the desktop gets a moment to apply what the start command changed before capturing
 
 
 def resolve_audio(cfg, system, mic, devices=None):
@@ -76,6 +80,7 @@ class RecordingJob:
         self._tick_id = 0
         self._ticks = 0
         self._done = False
+        self._hook_ran = False
 
     # ------------------------------------------------------------------ start
     def start(self):
@@ -95,12 +100,39 @@ class RecordingJob:
         except GLib.Error:
             self.audio, notes = [], ["Sound devices could not be read, so the recording has no sound."]
         self.notes += notes
+        # "record_start_command": e.g. switch off effects that make the compositor too slow to deliver 60 frames a second
+        self._hook_ran = self._run_hook("record_start_command", wait=True)
+        if self._hook_ran:
+            GLib.timeout_add(HOOK_SETTLE_MS, self._open_cast)
+        else:
+            self._open_cast()
+
+    def _run_hook(self, key, wait):
+        """Run the command in config key ``key`` (if any). True when it ran. A failure is only mentioned in the notes."""
+        cmd = (self.cfg[key] or "").strip()
+        if not cmd:
+            return False
+        quiet = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            if wait:
+                subprocess.run(shlex.split(cmd), timeout=HOOK_TIMEOUT_S, check=True, **quiet)
+            else:
+                subprocess.Popen(shlex.split(cmd), start_new_session=True, **quiet)
+        except (OSError, ValueError, subprocess.SubprocessError) as e:
+            self.notes.append(f"The command set in {key} could not be run ({e}).")
+            return False
+        return True
+
+    def _open_cast(self):
+        if self._done:                                    # stopped while the start command was settling
+            return False
         if self.target["kind"] == "window":
             self.cast = portal_cast.WindowCast(cursor=self.cursor, on_closed=self._source_closed)
         else:
             self.cast = castsession.MonitorCast(self.target["connector"], cursor=self.cursor, size=self.target["size"],
                                                 on_closed=self._source_closed)
         self.cast.open(self._opened)
+        return False
 
     def _opened(self, info, err):
         if info is None:
@@ -202,6 +234,9 @@ class RecordingJob:
         self.state = "done"
         if self.cast is not None:
             self.cast.close()
+        if self._hook_ran:
+            self._hook_ran = False
+            self._run_hook("record_stop_command", wait=False)
         self.on_done({"path": path, "error": error, "warning": warning, "notes": list(self.notes), "seconds": seconds,
                       "cancelled": cancelled})
 
